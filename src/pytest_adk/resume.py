@@ -23,28 +23,35 @@ def load_session_from_json(path_or_str: str | Path) -> Session:
 
   Args:
       path_or_str: Path to a ``.session.json``-style file, or the JSON text.
+          A ``str`` whose (stripped) first character is ``{`` or ``[`` is
+          treated as JSON content; otherwise it is treated as a file path and
+          must exist.
 
   Returns:
       Parsed :class:`google.adk.sessions.session.Session`.
+
+  Raises:
+      FileNotFoundError: If ``path_or_str`` refers to a path that does not
+          exist on disk.
   """
   if isinstance(path_or_str, Path):
     if not path_or_str.is_file():
       raise FileNotFoundError(path_or_str)
     data = path_or_str.read_text(encoding='utf-8')
   else:
-    stripped = path_or_str.strip()
+    stripped = path_or_str.lstrip()
     # Avoid Path(...).is_file() on large JSON strings (long path errors).
     if stripped.startswith('{') or stripped.startswith('['):
       data = path_or_str
     else:
       candidate = Path(path_or_str)
       try:
-        if candidate.is_file():
-          data = candidate.read_text(encoding='utf-8')
-        else:
-          data = path_or_str
-      except OSError:
-        data = path_or_str
+        is_file = candidate.is_file()
+      except OSError as exc:
+        raise FileNotFoundError(path_or_str) from exc
+      if not is_file:
+        raise FileNotFoundError(path_or_str)
+      data = candidate.read_text(encoding='utf-8')
 
   return Session.model_validate_json(data)
 

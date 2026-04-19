@@ -29,6 +29,32 @@ def test_load_session_from_json_file(tmp_path) -> None:
   assert loaded.state['plain'] == 1
 
 
+def test_load_session_from_json_string_path(tmp_path) -> None:
+  session = Session(
+      id='sid',
+      app_name='app1',
+      user_id='uid1',
+      state={},
+      events=[],
+  )
+  path = tmp_path / 'export.session.json'
+  path.write_text(session.model_dump_json(), encoding='utf-8')
+  loaded = load_session_from_json(str(path))
+  assert loaded.id == 'sid'
+
+
+def test_load_session_from_json_missing_string_path_raises(tmp_path) -> None:
+  missing = tmp_path / 'missing.session.json'
+  with pytest.raises(FileNotFoundError):
+    load_session_from_json(str(missing))
+
+
+def test_load_session_from_json_missing_path_raises(tmp_path) -> None:
+  missing = tmp_path / 'missing.session.json'
+  with pytest.raises(FileNotFoundError):
+    load_session_from_json(missing)
+
+
 @pytest.mark.asyncio
 async def test_runner_from_exported_session_restores_via_session_service() -> None:
   exported = Session(
