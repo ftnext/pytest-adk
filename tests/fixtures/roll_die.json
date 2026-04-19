@@ -1,0 +1,394 @@
+{
+  "id": "64f557af-53c3-4986-96c4-f1ca3e028cd2",
+  "appName": "fields_planner",
+  "userId": "user",
+  "state": {
+    "__session_metadata__": {
+      "displayName": "Roll a die."
+    },
+    "rolls": [
+      5,
+      4
+    ]
+  },
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Roll a die."
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-823398c3-d9c6-46b0-ac00-c63b67895759",
+      "author": "user",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "0d8c9a39-09be-484b-9372-93ae9fc61a12",
+      "timestamp": 1776595526.071088
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*PLANNING*/\nThe user wants to roll a die. I need to know how many sides the die should have. I will ask the user for this information. If the user had specified the number of sides, my plan would be to call the `roll_die` tool with the specified number of sides.\n\n/*FINAL_ANSWER*/",
+            "thought": true
+          },
+          {
+            "text": "\nI can roll a die for you. How many sides should the die have?"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 87,
+        "promptTokenCount": 1152,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1152
+          }
+        ],
+        "totalTokenCount": 1239
+      },
+      "invocationId": "e-823398c3-d9c6-46b0-ac00-c63b67895759",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "5fbab527-b0fc-4a1d-a9ce-ee263606b29a",
+      "timestamp": 1776595526.075487
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "6"
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "user",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "d8730acc-844e-4d2e-baf8-c1ea111cc823",
+      "timestamp": 1776595532.259686
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*PLANNING*/\nThe user wants to roll a 6-sided die. I should call the `roll_die` tool with `sides=6`. After rolling the die, I will present the result to the user.\n\n/*ACTION*/\n",
+            "thought": true
+          },
+          {
+            "functionCall": {
+              "id": "adk-e8e6b4f9-9c9e-4660-ab2d-5795fa2bb27c",
+              "args": {
+                "sides": 6
+              },
+              "name": "roll_die"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 67,
+        "promptTokenCount": 1242,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1242
+          }
+        ],
+        "totalTokenCount": 1309
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "longRunningToolIds": [],
+      "id": "e16664bd-fea9-4881-8b26-fa4c8df487a3",
+      "timestamp": 1776595532.2629561
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionResponse": {
+              "id": "adk-e8e6b4f9-9c9e-4660-ab2d-5795fa2bb27c",
+              "name": "roll_die",
+              "response": {
+                "result": 5
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {
+          "rolls": [
+            5
+          ]
+        },
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "9350baad-d5bc-45a8-90fb-77635079cee0",
+      "timestamp": 1776595533.1895869
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*REASONING*/\nThe die has been rolled, and the result is 5. I will now inform the user of the result.\n\n/*FINAL_ANSWER*/",
+            "thought": true
+          },
+          {
+            "text": "\nI rolled a 6-sided die, and the result is 5."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 52,
+        "promptTokenCount": 1324,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1324
+          }
+        ],
+        "totalTokenCount": 1376
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "00e6baa3-a4f8-4346-80a2-37746dd21ec0",
+      "timestamp": 1776595533.1949272
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Roll a die again."
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-618146ca-570c-47e4-9a67-17795a2cbdc0",
+      "author": "user",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "f1fbc9c3-f3c0-415f-9c40-ff54f271750c",
+      "timestamp": 1776595607.19564
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*PLANNING*/\nThe user wants to roll a die again. I need to know how many sides the die should have. I will ask the user for this information. If the user had specified the number of sides, my plan would be to call the `roll_die` tool with the specified number of sides.\n\n/*FINAL_ANSWER*/",
+            "thought": true
+          },
+          {
+            "text": "\nI can roll a die for you again. How many sides should the die have?"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 89,
+        "promptTokenCount": 1383,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1383
+          }
+        ],
+        "totalTokenCount": 1472
+      },
+      "invocationId": "e-618146ca-570c-47e4-9a67-17795a2cbdc0",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "bed8f1c0-ca15-4ecb-9e43-abe4a0e6455b",
+      "timestamp": 1776595607.19959
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "6"
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "user",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "98fa1c3a-1042-4baa-8c1b-446f6d4b0d49",
+      "timestamp": 1776595612.70703
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*PLANNING*/\nThe user wants to roll a 6-sided die. I should call the `roll_die` tool with `sides=6`. After rolling the die, I will present the result to the user.\n\n/*ACTION*/\n",
+            "thought": true
+          },
+          {
+            "functionCall": {
+              "id": "adk-736768bb-09e4-4d2d-9cff-bac16e3c72e4",
+              "args": {
+                "sides": 6
+              },
+              "name": "roll_die"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 67,
+        "promptTokenCount": 1475,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1475
+          }
+        ],
+        "totalTokenCount": 1542
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "longRunningToolIds": [],
+      "id": "a408f759-43a5-4a75-bbec-0fc2ab8a0e79",
+      "timestamp": 1776595612.7110069
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionResponse": {
+              "id": "adk-736768bb-09e4-4d2d-9cff-bac16e3c72e4",
+              "name": "roll_die",
+              "response": {
+                "result": 4
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {
+          "rolls": [
+            5,
+            4
+          ]
+        },
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "28f5cee2-fe5b-4a73-bf75-7187cd821b43",
+      "timestamp": 1776595614.1400151
+    },
+    {
+      "modelVersion": "gemini-2.5-flash-lite",
+      "content": {
+        "parts": [
+          {
+            "text": "/*REASONING*/\nThe die has been rolled, and the result is 4. I will now inform the user of the result.\n\n/*FINAL_ANSWER*/",
+            "thought": true
+          },
+          {
+            "text": "\nI rolled a 6-sided die, and the result is 4."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "candidatesTokenCount": 52,
+        "promptTokenCount": 1557,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 1557
+          }
+        ],
+        "totalTokenCount": 1609
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {},
+        "artifactDelta": {},
+        "requestedAuthConfigs": {},
+        "requestedToolConfirmations": {}
+      },
+      "id": "a3cedad4-eacd-4d21-b869-e5405e3f134b",
+      "timestamp": 1776595614.1448278
+    }
+  ],
+  "lastUpdateTime": 1776595633.958192
+}
