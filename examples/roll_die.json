@@ -1,0 +1,196 @@
+{
+  "id": "64f557af-53c3-4986-96c4-f1ca3e028cd2",
+  "appName": "fields_planner",
+  "userId": "user",
+  "state": {
+    "rolls": [
+      5,
+      4
+    ]
+  },
+  "events": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Roll a die."
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-823398c3-d9c6-46b0-ac00-c63b67895759",
+      "author": "user"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "\nI can roll a die for you. How many sides should the die have?"
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-823398c3-d9c6-46b0-ac00-c63b67895759",
+      "author": "data_processing_agent"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "6"
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "user"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "id": "adk-e8e6b4f9-9c9e-4660-ab2d-5795fa2bb27c",
+              "args": {
+                "sides": 6
+              },
+              "name": "roll_die"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionResponse": {
+              "id": "adk-e8e6b4f9-9c9e-4660-ab2d-5795fa2bb27c",
+              "name": "roll_die",
+              "response": {
+                "result": 5
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {
+          "rolls": [
+            5
+          ]
+        }
+      }
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "\nI rolled a 6-sided die, and the result is 5."
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-43382a14-3b71-4b3b-8f15-cf7e34b166ff",
+      "author": "data_processing_agent"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Roll a die again."
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-618146ca-570c-47e4-9a67-17795a2cbdc0",
+      "author": "user"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "\nI can roll a die for you again. How many sides should the die have?"
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-618146ca-570c-47e4-9a67-17795a2cbdc0",
+      "author": "data_processing_agent"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "6"
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "user"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "id": "adk-736768bb-09e4-4d2d-9cff-bac16e3c72e4",
+              "args": {
+                "sides": 6
+              },
+              "name": "roll_die"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent"
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "functionResponse": {
+              "id": "adk-736768bb-09e4-4d2d-9cff-bac16e3c72e4",
+              "name": "roll_die",
+              "response": {
+                "result": 4
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent",
+      "actions": {
+        "stateDelta": {
+          "rolls": [
+            5,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "\nI rolled a 6-sided die, and the result is 4."
+          }
+        ],
+        "role": "model"
+      },
+      "invocationId": "e-25bf7844-c02f-4076-af7a-efa473ecf009",
+      "author": "data_processing_agent"
+    }
+  ]
+}
