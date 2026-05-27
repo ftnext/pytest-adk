@@ -39,6 +39,33 @@ class AgentEvaluator:
     This mirrors :meth:`google.adk.evaluation.AgentEvaluator.evaluate`, with an
     added ``results_dir`` hook that saves the per-test-file
     ``EvalSetResult`` before metric failures are asserted.
+
+    Example:
+        .. code-block:: python
+
+           import pytest
+           from pytest_adk import AgentEvaluator
+
+
+           @pytest.mark.asyncio
+           async def test_with_single_test_file(tmp_path):
+             await AgentEvaluator.evaluate(
+                 agent_module='home_automation_agent',
+                 eval_dataset_file_path_or_dir=(
+                     'tests/integration/fixture/home_automation_agent/'
+                     'simple_test.test.json'
+                 ),
+                 results_dir=tmp_path,
+             )
+
+        Eval result JSON files are written under
+        ``results_dir/test_app/.adk/eval_history/``.
+
+    Background:
+        This helper was inspired by the workflow described in:
+        https://nikkie-ftnext.hatenablog.com/entry/google-adk-python-evaluation-use-local-eval-set-results-manager
+        The upstream ADK PR for optional eval result persistence is still open:
+        https://github.com/google/adk-python/pull/4414
     """
     eval_dataset_path = os.fspath(eval_dataset_file_path_or_dir)
     test_files = []
