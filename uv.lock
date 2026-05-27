@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-04-16T14:36:44.669255Z"
+exclude-newer = "2026-05-24T23:00:34.659022Z"
 exclude-newer-span = "P3D"
 
 [[package]]
@@ -2515,7 +2515,7 @@ wheels = [
 
 [[package]]
 name = "pytest-adk"
-version = "0.0.1"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "google-adk" },
