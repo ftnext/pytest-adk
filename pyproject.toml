@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "google-adk>=1.30.0",
     'tomli; python_version < "3.11"',
+    "tomli-w",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,9 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
+
+[project.scripts]
+pytest-adk-eval-schema = "pytest_adk.template:main"
 
 [tool.pytest]
 testpaths = ["tests"]
