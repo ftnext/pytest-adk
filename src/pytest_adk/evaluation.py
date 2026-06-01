@@ -7,8 +7,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
+try:
+  import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+  import tomli as tomllib
+
 from google.adk.evaluation import AgentEvaluator as _AdkAgentEvaluator
 from google.adk.evaluation.eval_config import get_eval_metrics_from_config
+from google.adk.evaluation.eval_set import EvalSet
 from google.adk.evaluation.local_eval_set_results_manager import (
     LocalEvalSetResultsManager,
 )
@@ -18,6 +24,20 @@ from google.adk.evaluation.simulation.user_simulator_provider import (
 
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
+
+
+def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
+  """Load an EvalSet from a TOML file (new EvalSet schema only).
+
+  Unlike ADK's JSON loader, this does not support the legacy data format or an
+  explicit ``initial_session``; the initial session must be expressed inside the
+  EvalSet schema.
+
+  ``tomllib.load`` requires a binary handle, so we read text and use
+  ``tomllib.loads`` to stay consistent with the rest of the package.
+  """
+  data = tomllib.loads(Path(eval_set_file).read_text(encoding='utf-8'))
+  return EvalSet.model_validate(data)
 
 
 class AgentEvaluator:
@@ -72,7 +92,7 @@ class AgentEvaluator:
     if os.path.isdir(eval_dataset_path):
       for root, _, files in os.walk(eval_dataset_path):
         for file in files:
-          if file.endswith('.test.json'):
+          if file.endswith(('.test.json', '.test.toml')):
             test_files.append(os.path.join(root, file))
     else:
       test_files = [eval_dataset_path]
@@ -83,9 +103,17 @@ class AgentEvaluator:
 
     for test_file in test_files:
       eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
-      eval_set = _AdkAgentEvaluator._load_eval_set_from_file(
-          test_file, eval_config, initial_session
-      )
+      if test_file.endswith('.test.toml'):
+        assert len(initial_session) == 0, (
+            'Initial session should be specified as a part of the EvalSet file.'
+            ' An explicit initial_session_file is not supported for TOML'
+            ' evalsets, which use the EvalSet schema only.'
+        )
+        eval_set = _load_eval_set_from_toml(test_file)
+      else:
+        eval_set = _AdkAgentEvaluator._load_eval_set_from_file(
+            test_file, eval_config, initial_session
+        )
 
       await AgentEvaluator._evaluate_eval_set_and_save(
           agent_module=agent_module,

@@ -236,3 +236,99 @@ async def test_agent_evaluator_saves_before_raising_for_metric_failure(
 
   saved_files = _saved_result_files(tmp_path)
   assert len(saved_files) == 1
+
+
+_MULTILINE_TOML_EVALSET = '''\
+eval_set_id = "home_automation"
+
+[[eval_cases]]
+eval_id = "turn_on_living_room"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = """
+Please turn on the living room light.
+Then confirm it is on.
+""" } ]
+
+[eval_cases.conversation.final_response]
+role = "model"
+parts = [ { text = "The living room light is now on." } ]
+'''
+
+
+def test_load_eval_set_from_toml_minimal(tmp_path) -> None:
+  test_file = tmp_path / 'minimal.test.toml'
+  test_file.write_text(
+      'eval_set_id = "x"\neval_cases = []\n', encoding='utf-8'
+  )
+
+  eval_set = evaluation_module._load_eval_set_from_toml(test_file)
+
+  assert eval_set.eval_set_id == 'x'
+  assert eval_set.eval_cases == []
+
+
+def test_load_eval_set_from_toml_preserves_multiline_prompt(tmp_path) -> None:
+  test_file = tmp_path / 'multiline.test.toml'
+  test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
+
+  eval_set = evaluation_module._load_eval_set_from_toml(test_file)
+
+  assert eval_set.eval_set_id == 'home_automation'
+  invocation = eval_set.eval_cases[0].conversation[0]
+  user_text = invocation.user_content.parts[0].text
+  assert (
+      user_text
+      == 'Please turn on the living room light.\nThen confirm it is on.\n'
+  )
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_directory_finds_json_and_toml(
+    tmp_path, monkeypatch
+) -> None:
+  json_test = tmp_path / 'cases.test.json'
+  toml_test = tmp_path / 'cases.test.toml'
+  ignored_json = tmp_path / 'plain.json'
+  ignored_toml = tmp_path / 'plain.toml'
+  json_test.write_text('{}', encoding='utf-8')
+  toml_test.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
+  for path in [ignored_json, ignored_toml]:
+    path.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=tmp_path,
+      num_runs=1,
+      results_dir=tmp_path / 'results',
+  )
+
+  assert len(_saved_result_files(tmp_path / 'results')) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_toml_rejects_initial_session_file(
+    tmp_path, monkeypatch
+) -> None:
+  test_file = tmp_path / 'cases.test.toml'
+  test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  monkeypatch.setattr(
+      evaluation_module._AdkAgentEvaluator,
+      '_get_initial_session',
+      staticmethod(lambda initial_session_file=None: {'state': {'k': 'v'}}),
+  )
+
+  with pytest.raises(AssertionError, match='not supported for TOML'):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+        initial_session_file='initial.json',
+        results_dir=tmp_path / 'results',
+    )

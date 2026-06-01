@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-24T23:00:34.659022Z"
+exclude-newer = "2026-05-29T16:01:53.014171Z"
 exclude-newer-span = "P3D"
 
 [[package]]
@@ -2519,6 +2519,7 @@ version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "google-adk" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -2532,6 +2533,7 @@ requires-dist = [
     { name = "google-adk", specifier = ">=1.30.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 provides-extras = ["dev"]
 
