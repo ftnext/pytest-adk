@@ -312,6 +312,122 @@ async def test_agent_evaluator_directory_finds_json_and_toml(
 
 
 @pytest.mark.asyncio
+async def test_agent_evaluator_directory_skips_non_convention_files(
+    tmp_path, monkeypatch
+) -> None:
+  seen_test_files = []
+  test_file = tmp_path / 'cases.test.json'
+  # Files that share the .json extension but not the .test. naming convention
+  # must be ignored during directory discovery.
+  config_file = tmp_path / 'test_config.json'
+  result_file = tmp_path / 'cases.evalset_result.json'
+  plain_file = tmp_path / 'plain.json'
+  for path in [test_file, config_file, result_file, plain_file]:
+    path.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch, seen_test_files=seen_test_files)
+
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=tmp_path,
+      num_runs=1,
+      results_dir=tmp_path / 'results',
+  )
+
+  assert seen_test_files == [str(test_file)]
+  assert len(_saved_result_files(tmp_path / 'results')) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_direct_convention_file_does_not_warn(
+    tmp_path, monkeypatch, caplog
+) -> None:
+  test_file = tmp_path / 'foo.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  with caplog.at_level('WARNING', logger=evaluation_module.logger.name):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+        results_dir=tmp_path / 'results',
+    )
+
+  assert caplog.records == []
+  assert len(_saved_result_files(tmp_path / 'results')) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_direct_convention_toml_does_not_warn(
+    tmp_path, monkeypatch, caplog
+) -> None:
+  test_file = tmp_path / 'foo.test.toml'
+  test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  with caplog.at_level('WARNING', logger=evaluation_module.logger.name):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+        results_dir=tmp_path / 'results',
+    )
+
+  assert caplog.records == []
+  assert len(_saved_result_files(tmp_path / 'results')) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_direct_non_convention_json_warns(
+    tmp_path, monkeypatch, caplog
+) -> None:
+  test_file = tmp_path / 'foo.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  with caplog.at_level('WARNING', logger=evaluation_module.logger.name):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+        results_dir=tmp_path / 'results',
+    )
+
+  # The file is still processed despite the non-conventional name.
+  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert len(caplog.records) == 1
+  message = caplog.records[0].getMessage()
+  assert str(test_file) in message
+  assert 'naming convention' in message
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_direct_non_convention_toml_loads_as_toml(
+    tmp_path, monkeypatch, caplog
+) -> None:
+  # A directly specified .toml without the .test. infix should still be parsed
+  # by the TOML loader (extension-based routing), with a warning emitted.
+  test_file = tmp_path / 'foo.toml'
+  test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  with caplog.at_level('WARNING', logger=evaluation_module.logger.name):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+        results_dir=tmp_path / 'results',
+    )
+
+  saved_files = _saved_result_files(tmp_path / 'results')
+  assert len(saved_files) == 1
+  saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
+  assert saved_result['eval_set_id'] == 'home_automation'
+  assert len(caplog.records) == 1
+  assert 'naming convention' in caplog.records[0].getMessage()
+
+
+@pytest.mark.asyncio
 async def test_agent_evaluator_toml_rejects_initial_session_file(
     tmp_path, monkeypatch
 ) -> None:

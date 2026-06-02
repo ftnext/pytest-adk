@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,8 @@ from google.adk.evaluation.simulation.user_simulator_provider import (
 )
 
 from .prompt_template import _expand_prompt_templates
+
+logger = logging.getLogger(__name__)
 
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
@@ -92,11 +95,19 @@ class AgentEvaluator:
     eval_dataset_path = os.fspath(eval_dataset_file_path_or_dir)
     test_files = []
     if os.path.isdir(eval_dataset_path):
+      # When a directory is given, only the ADK naming convention
+      # (``.test.json`` / ``.test.toml``) is picked up recursively. This keeps
+      # sibling files such as ``test_config.json`` (eval metrics) and the
+      # ``*.evalset_result.json`` files written by this helper from being
+      # mistakenly loaded as evalsets.
       for root, _, files in os.walk(eval_dataset_path):
         for file in files:
           if file.endswith(('.test.json', '.test.toml')):
             test_files.append(os.path.join(root, file))
     else:
+      # A directly specified file is taken at face value; the user's intent is
+      # explicit. Extension routing (and a naming-convention warning) happens
+      # per file below.
       test_files = [eval_dataset_path]
 
     initial_session = _AdkAgentEvaluator._get_initial_session(
@@ -104,8 +115,19 @@ class AgentEvaluator:
     )
 
     for test_file in test_files:
+      # Files discovered via a directory always satisfy the convention, so this
+      # only fires for directly specified files that skip the ``.test.`` infix.
+      # The check uses the basename so a ``.test.`` directory name does not mask
+      # a non-conventional file.
+      if '.test.' not in os.path.basename(test_file):
+        logger.warning(
+            'Evalset file %r does not follow the .test.json/.test.toml naming'
+            ' convention; loading it anyway because it was specified directly.',
+            test_file,
+        )
+
       eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
-      if test_file.endswith('.test.toml'):
+      if test_file.endswith('.toml'):
         assert len(initial_session) == 0, (
             'Initial session should be specified as a part of the EvalSet file.'
             ' An explicit initial_session_file is not supported for TOML'
