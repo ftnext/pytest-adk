@@ -1,5 +1,30 @@
 # pytest-adk
 
+## Usage
+
+`AgentEvaluator` is a pytest fixture, auto-registered via the `pytest11` entry
+point — installing `pytest-adk` makes it available with no import and no
+`conftest.py`. Just request it as a test argument:
+
+```python
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_home_automation(AgentEvaluator):
+    await AgentEvaluator.evaluate(
+        agent_module='home_automation_agent',
+        eval_dataset_file_path_or_dir=(
+            'tests/integration/fixture/home_automation_agent/'
+            'simple_test.test.json'
+        ),
+    )
+```
+
+The fixture binds the eval results directory to pytest's `tmp_path`, so you no
+longer pass `results_dir` yourself. Result JSON files are written under
+`tmp_path/test_app/.adk/eval_history/`.
+
 ## Evalset files: JSON or TOML
 
 `AgentEvaluator.evaluate` discovers and loads evalset files in two formats:

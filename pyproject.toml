@@ -1,6 +1,6 @@
 [project]
 name = "pytest-adk"
-version = "0.0.4"
+version = "0.0.5"
 description = "Helpers for testing agents with Google's adk-python"
 authors = [
     { name = "ftnext", email = "takuyafjp+develop@gmail.com" }
@@ -32,6 +32,9 @@ dev = [
 
 [project.scripts]
 pytest-adk-eval-schema = "pytest_adk.template:main"
+
+[project.entry-points.pytest11]
+pytest_adk = "pytest_adk.plugin"
 
 [tool.pytest]
 testpaths = ["tests"]
