@@ -4,8 +4,15 @@
 
 `AgentEvaluator.evaluate` discovers and loads evalset files in two formats:
 
-- `*.test.json` — the schema used by google-adk's `AgentEvaluator`.
-- `*.test.toml` — the same `EvalSet` schema, written in TOML.
+- `*.json` — the schema used by google-adk's `AgentEvaluator`.
+- `*.toml` — the same `EvalSet` schema, written in TOML.
+
+When a directory is passed, every `.json` and `.toml` file under it is loaded;
+the loader is chosen by extension (`.toml` → TOML, otherwise JSON). The
+recommended convention is still to name evalset files `*.test.json` /
+`*.test.toml` (this is what google-adk's `AgentEvaluator` looks for). A file
+whose path does not contain `.test.` is still processed, but a warning is
+logged so accidental matches are easy to spot.
 
 TOML is handy when a user prompt spans multiple lines: TOML multi-line strings
 (`"""..."""`) keep newlines readable, instead of JSON's `\n`-escaped one-liners.

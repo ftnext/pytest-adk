@@ -164,7 +164,7 @@ async def test_agent_evaluator_is_exported_and_saves_single_file(
 
 
 @pytest.mark.asyncio
-async def test_agent_evaluator_directory_finds_recursive_test_files(
+async def test_agent_evaluator_directory_finds_recursive_json_files(
     tmp_path, monkeypatch
 ) -> None:
   seen_test_files = []
@@ -172,8 +172,8 @@ async def test_agent_evaluator_directory_finds_recursive_test_files(
   nested = tmp_path / 'nested'
   nested.mkdir()
   nested_test = nested / 'nested.test.json'
-  ignored = nested / 'ignored.json'
-  for path in [root_test, nested_test, ignored]:
+  not_json = nested / 'notes.txt'
+  for path in [root_test, nested_test, not_json]:
     path.write_text('{}', encoding='utf-8')
   _patch_successful_adk_eval(monkeypatch, seen_test_files=seen_test_files)
 
@@ -186,6 +186,32 @@ async def test_agent_evaluator_directory_finds_recursive_test_files(
 
   assert set(seen_test_files) == {str(root_test), str(nested_test)}
   assert len(_saved_result_files(tmp_path / 'results')) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_evaluator_processes_json_without_test_suffix_and_warns(
+    tmp_path, monkeypatch, caplog
+) -> None:
+  seen_test_files = []
+  plain = tmp_path / 'plain.json'
+  plain.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch, seen_test_files=seen_test_files)
+
+  with caplog.at_level('WARNING', logger=evaluation_module.logger.name):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=tmp_path,
+        num_runs=1,
+        results_dir=tmp_path / 'results',
+    )
+
+  assert seen_test_files == [str(plain)]
+  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert any(
+      str(plain) in record.getMessage()
+      and 'naming convention' in record.getMessage()
+      for record in caplog.records
+  )
 
 
 @pytest.mark.asyncio
@@ -293,12 +319,10 @@ async def test_agent_evaluator_directory_finds_json_and_toml(
 ) -> None:
   json_test = tmp_path / 'cases.test.json'
   toml_test = tmp_path / 'cases.test.toml'
-  ignored_json = tmp_path / 'plain.json'
-  ignored_toml = tmp_path / 'plain.toml'
+  not_evalset = tmp_path / 'README.md'
   json_test.write_text('{}', encoding='utf-8')
   toml_test.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
-  for path in [ignored_json, ignored_toml]:
-    path.write_text('{}', encoding='utf-8')
+  not_evalset.write_text('# not an evalset', encoding='utf-8')
   _patch_successful_adk_eval(monkeypatch)
 
   await AgentEvaluator.evaluate(

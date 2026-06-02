@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,8 @@ from google.adk.evaluation.simulation.user_simulator_provider import (
 )
 
 from .prompt_template import _expand_prompt_templates
+
+logger = logging.getLogger(__name__)
 
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
@@ -94,7 +97,7 @@ class AgentEvaluator:
     if os.path.isdir(eval_dataset_path):
       for root, _, files in os.walk(eval_dataset_path):
         for file in files:
-          if file.endswith(('.test.json', '.test.toml')):
+          if file.endswith(('.json', '.toml')):
             test_files.append(os.path.join(root, file))
     else:
       test_files = [eval_dataset_path]
@@ -104,8 +107,14 @@ class AgentEvaluator:
     )
 
     for test_file in test_files:
+      if '.test.' not in test_file:
+        logger.warning(
+            'Evalset file %r does not follow the `*.test.json` /'
+            ' `*.test.toml` naming convention; processing it anyway.',
+            test_file,
+        )
       eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
-      if test_file.endswith('.test.toml'):
+      if test_file.endswith('.toml'):
         assert len(initial_session) == 0, (
             'Initial session should be specified as a part of the EvalSet file.'
             ' An explicit initial_session_file is not supported for TOML'
