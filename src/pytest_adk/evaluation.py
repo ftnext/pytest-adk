@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
 
+# Subpath that ADK's LocalEvalSetResultsManager writes ``*.evalset_result.json``
+# files into, relative to ``{results_dir}/{app_name}/``.
+_ADK_EVAL_HISTORY_SUBDIR = Path('.adk') / 'eval_history'
+
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
   """Load an EvalSet from a TOML file (new EvalSet schema only).
@@ -59,6 +63,17 @@ class _AgentEvaluator:
   def results_dir(self) -> str | Path:
     """Directory under which eval results are saved."""
     return self._results_dir
+
+  @property
+  def eval_history_dir(self) -> Path:
+    """Directory where ADK writes ``*.evalset_result.json`` files.
+
+    This mirrors the layout used by
+    :class:`~google.adk.evaluation.local_eval_set_results_manager.LocalEvalSetResultsManager`
+    so the location can be surfaced (e.g. by the ``AgentEvaluator`` plugin's
+    terminal summary) without re-deriving the path elsewhere.
+    """
+    return Path(self._results_dir) / _EVAL_APP_NAME / _ADK_EVAL_HISTORY_SUBDIR
 
   async def evaluate(
       self,

@@ -25,6 +25,17 @@ The fixture binds the eval results directory to pytest's `tmp_path`, so you no
 longer pass `results_dir` yourself. Result JSON files are written under
 `tmp_path/test_app/.adk/eval_history/`.
 
+After the run, pytest's terminal summary prints an `ADK eval results` section
+listing, for every test that used the fixture, the `eval_history` directory
+where its results were saved — shown regardless of whether the test passed or
+failed, so you can always find them:
+
+```
+=================== ADK eval results ===================
+tests/test_home_automation.py::test_home_automation
+  /tmp/pytest-of-you/pytest-0/test_home_automation0/test_app/.adk/eval_history
+```
+
 ## Evalset files: JSON or TOML
 
 `AgentEvaluator.evaluate` discovers and loads evalset files in two formats:
