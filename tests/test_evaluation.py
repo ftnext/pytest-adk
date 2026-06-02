@@ -15,7 +15,6 @@ from google.adk.evaluation.eval_result import EvalCaseResult
 from google.genai import types
 
 import pytest_adk.evaluation as evaluation_module
-from pytest_adk import AgentEvaluator
 
 
 def _eval_case_result(eval_id: str, run_index: int = 0) -> EvalCaseResult:
@@ -141,8 +140,8 @@ def _saved_result_files(results_dir: Path) -> list[Path]:
 
 
 @pytest.mark.asyncio
-async def test_agent_evaluator_is_exported_and_saves_single_file(
-    tmp_path, monkeypatch
+async def test_agent_evaluator_saves_single_file(
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   test_file = tmp_path / 'single.test.json'
   test_file.write_text('{}', encoding='utf-8')
@@ -152,11 +151,10 @@ async def test_agent_evaluator_is_exported_and_saves_single_file(
       agent_module='fake_agent',
       eval_dataset_file_path_or_dir=test_file,
       num_runs=1,
-      results_dir=tmp_path,
   )
 
   assert result is None
-  saved_files = _saved_result_files(tmp_path)
+  saved_files = _saved_result_files(AgentEvaluator.results_dir)
   assert len(saved_files) == 1
   saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
   assert saved_result['eval_set_id'] == 'single.test'
@@ -165,7 +163,7 @@ async def test_agent_evaluator_is_exported_and_saves_single_file(
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   seen_test_files = []
   root_test = tmp_path / 'root.test.json'
@@ -181,16 +179,15 @@ async def test_agent_evaluator_directory_finds_recursive_test_files(
       agent_module='fake_agent',
       eval_dataset_file_path_or_dir=tmp_path,
       num_runs=1,
-      results_dir=tmp_path / 'results',
   )
 
   assert set(seen_test_files) == {str(root_test), str(nested_test)}
-  assert len(_saved_result_files(tmp_path / 'results')) == 2
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 2
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_saves_each_run_for_eval_case(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   test_file = tmp_path / 'multi.test.json'
   test_file.write_text('{}', encoding='utf-8')
@@ -200,17 +197,16 @@ async def test_agent_evaluator_saves_each_run_for_eval_case(
       agent_module='fake_agent',
       eval_dataset_file_path_or_dir=str(test_file),
       num_runs=3,
-      results_dir=tmp_path,
   )
 
-  saved_files = _saved_result_files(tmp_path)
+  saved_files = _saved_result_files(AgentEvaluator.results_dir)
   saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
   assert len(saved_result['eval_case_results']) == 3
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_saves_before_raising_for_metric_failure(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   test_file = tmp_path / 'failure.test.json'
   test_file.write_text('{}', encoding='utf-8')
@@ -231,10 +227,9 @@ async def test_agent_evaluator_saves_before_raising_for_metric_failure(
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
         print_detailed_results=False,
-        results_dir=tmp_path,
     )
 
-  saved_files = _saved_result_files(tmp_path)
+  saved_files = _saved_result_files(AgentEvaluator.results_dir)
   assert len(saved_files) == 1
 
 
@@ -289,7 +284,7 @@ def test_load_eval_set_from_toml_preserves_multiline_prompt(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_json_and_toml(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   json_test = tmp_path / 'cases.test.json'
   toml_test = tmp_path / 'cases.test.toml'
@@ -305,15 +300,14 @@ async def test_agent_evaluator_directory_finds_json_and_toml(
       agent_module='fake_agent',
       eval_dataset_file_path_or_dir=tmp_path,
       num_runs=1,
-      results_dir=tmp_path / 'results',
   )
 
-  assert len(_saved_result_files(tmp_path / 'results')) == 2
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 2
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_skips_non_convention_files(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   seen_test_files = []
   test_file = tmp_path / 'cases.test.json'
@@ -330,16 +324,15 @@ async def test_agent_evaluator_directory_skips_non_convention_files(
       agent_module='fake_agent',
       eval_dataset_file_path_or_dir=tmp_path,
       num_runs=1,
-      results_dir=tmp_path / 'results',
   )
 
   assert seen_test_files == [str(test_file)]
-  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 1
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_direct_convention_file_does_not_warn(
-    tmp_path, monkeypatch, caplog
+    AgentEvaluator, tmp_path, monkeypatch, caplog
 ) -> None:
   test_file = tmp_path / 'foo.test.json'
   test_file.write_text('{}', encoding='utf-8')
@@ -350,16 +343,15 @@ async def test_agent_evaluator_direct_convention_file_does_not_warn(
         agent_module='fake_agent',
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
-        results_dir=tmp_path / 'results',
     )
 
   assert caplog.records == []
-  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 1
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_direct_convention_toml_does_not_warn(
-    tmp_path, monkeypatch, caplog
+    AgentEvaluator, tmp_path, monkeypatch, caplog
 ) -> None:
   test_file = tmp_path / 'foo.test.toml'
   test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
@@ -370,16 +362,15 @@ async def test_agent_evaluator_direct_convention_toml_does_not_warn(
         agent_module='fake_agent',
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
-        results_dir=tmp_path / 'results',
     )
 
   assert caplog.records == []
-  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 1
 
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_direct_non_convention_json_warns(
-    tmp_path, monkeypatch, caplog
+    AgentEvaluator, tmp_path, monkeypatch, caplog
 ) -> None:
   test_file = tmp_path / 'foo.json'
   test_file.write_text('{}', encoding='utf-8')
@@ -390,11 +381,10 @@ async def test_agent_evaluator_direct_non_convention_json_warns(
         agent_module='fake_agent',
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
-        results_dir=tmp_path / 'results',
     )
 
   # The file is still processed despite the non-conventional name.
-  assert len(_saved_result_files(tmp_path / 'results')) == 1
+  assert len(_saved_result_files(AgentEvaluator.results_dir)) == 1
   assert len(caplog.records) == 1
   message = caplog.records[0].getMessage()
   assert str(test_file) in message
@@ -403,7 +393,7 @@ async def test_agent_evaluator_direct_non_convention_json_warns(
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_direct_non_convention_toml_loads_as_toml(
-    tmp_path, monkeypatch, caplog
+    AgentEvaluator, tmp_path, monkeypatch, caplog
 ) -> None:
   # A directly specified .toml without the .test. infix should still be parsed
   # by the TOML loader (extension-based routing), with a warning emitted.
@@ -416,10 +406,9 @@ async def test_agent_evaluator_direct_non_convention_toml_loads_as_toml(
         agent_module='fake_agent',
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
-        results_dir=tmp_path / 'results',
     )
 
-  saved_files = _saved_result_files(tmp_path / 'results')
+  saved_files = _saved_result_files(AgentEvaluator.results_dir)
   assert len(saved_files) == 1
   saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
   assert saved_result['eval_set_id'] == 'home_automation'
@@ -429,7 +418,7 @@ async def test_agent_evaluator_direct_non_convention_toml_loads_as_toml(
 
 @pytest.mark.asyncio
 async def test_agent_evaluator_toml_rejects_initial_session_file(
-    tmp_path, monkeypatch
+    AgentEvaluator, tmp_path, monkeypatch
 ) -> None:
   test_file = tmp_path / 'cases.test.toml'
   test_file.write_text(_MULTILINE_TOML_EVALSET, encoding='utf-8')
@@ -446,5 +435,4 @@ async def test_agent_evaluator_toml_rejects_initial_session_file(
         eval_dataset_file_path_or_dir=test_file,
         num_runs=1,
         initial_session_file='initial.json',
-        results_dir=tmp_path / 'results',
     )

@@ -45,45 +45,52 @@ def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
   return EvalSet.model_validate(data)
 
 
-class AgentEvaluator:
-  """ADK AgentEvaluator wrapper that persists local eval results."""
+class _AgentEvaluator:
+  """ADK AgentEvaluator wrapper that persists local eval results.
 
-  @staticmethod
+  Construct with a ``results_dir``; the ``AgentEvaluator`` pytest fixture binds
+  it to pytest's ``tmp_path`` (see :mod:`pytest_adk.plugin`).
+  """
+
+  def __init__(self, results_dir: str | Path) -> None:
+    self._results_dir = results_dir
+
+  @property
+  def results_dir(self) -> str | Path:
+    """Directory under which eval results are saved."""
+    return self._results_dir
+
   async def evaluate(
+      self,
       agent_module: str,
       eval_dataset_file_path_or_dir: str | Path,
       num_runs: int = _NUM_RUNS,
       agent_name: Optional[str] = None,
       initial_session_file: Optional[str] = None,
       print_detailed_results: bool = True,
-      *,
-      results_dir: str | Path,
   ) -> None:
     """Evaluate an ADK agent and save generated eval results to disk.
 
     This mirrors :meth:`google.adk.evaluation.AgentEvaluator.evaluate`, with an
-    added ``results_dir`` hook that saves the per-test-file
-    ``EvalSetResult`` before metric failures are asserted.
+    added persistence hook that saves the per-test-file ``EvalSetResult`` under
+    the bound ``results_dir`` before metric failures are asserted.
 
     Example:
         .. code-block:: python
 
-           import pytest
-           from pytest_adk import AgentEvaluator
-
-
            @pytest.mark.asyncio
-           async def test_with_single_test_file(tmp_path):
+           async def test_with_single_test_file(AgentEvaluator):
              await AgentEvaluator.evaluate(
                  agent_module='home_automation_agent',
                  eval_dataset_file_path_or_dir=(
                      'tests/integration/fixture/home_automation_agent/'
                      'simple_test.test.json'
                  ),
-                 results_dir=tmp_path,
              )
 
-        Eval result JSON files are written under
+        ``AgentEvaluator`` is a pytest fixture (auto-registered via the
+        ``pytest11`` entry point) that binds ``results_dir`` to pytest's
+        ``tmp_path``. Eval result JSON files are written under
         ``results_dir/test_app/.adk/eval_history/``.
 
     Background:
@@ -143,18 +150,17 @@ class AgentEvaluator:
           eval_set, Path(test_file).parent
       )
 
-      await AgentEvaluator._evaluate_eval_set_and_save(
+      await self._evaluate_eval_set_and_save(
           agent_module=agent_module,
           eval_set=eval_set,
           eval_config=eval_config,
           num_runs=num_runs,
           agent_name=agent_name,
           print_detailed_results=print_detailed_results,
-          results_dir=results_dir,
       )
 
-  @staticmethod
   async def _evaluate_eval_set_and_save(
+      self,
       *,
       agent_module: str,
       eval_set,
@@ -162,7 +168,6 @@ class AgentEvaluator:
       num_runs: int,
       agent_name: Optional[str],
       print_detailed_results: bool,
-      results_dir: str | Path,
   ) -> None:
     agent_for_eval = await _AdkAgentEvaluator._get_agent_for_eval(
         module_name=agent_module, agent_name=agent_name
@@ -183,7 +188,7 @@ class AgentEvaluator:
     )
 
     results_manager = LocalEvalSetResultsManager(
-        agents_dir=os.fspath(results_dir)
+        agents_dir=os.fspath(self._results_dir)
     )
     all_eval_results = [
         result
