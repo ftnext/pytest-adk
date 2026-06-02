@@ -94,7 +94,9 @@ def _expand_prompt_templates(eval_set: EvalSet, base_dir: Path) -> EvalSet:
   EvalSet is modified in place and also returned for convenience.
   """
   for eval_case in eval_set.eval_cases:
-    for invocation in eval_case.conversation:
+    # ``conversation`` is None for cases driven by ``conversation_scenario``
+    # (the user simulator) instead of static invocations; nothing to expand.
+    for invocation in eval_case.conversation or []:
       _expand_content(invocation.user_content, base_dir)
       _expand_content(invocation.final_response, base_dir)
   return eval_set

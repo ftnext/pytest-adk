@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from google.adk.evaluation.conversation_scenarios import ConversationScenario
 from google.adk.evaluation.eval_case import EvalCase
 from google.adk.evaluation.eval_case import Invocation
 from google.adk.evaluation.eval_set import EvalSet
@@ -98,6 +99,26 @@ def test_invalid_assignment_raises(tmp_path) -> None:
 
   with pytest.raises(ValueError, match='KEY=VALUE'):
     _expand_prompt_templates(eval_set, tmp_path)
+
+
+def test_case_without_static_conversation_is_skipped(tmp_path) -> None:
+  # Cases driven by conversation_scenario have conversation=None; expansion
+  # must not crash trying to iterate it.
+  eval_set = EvalSet(
+      eval_set_id='scenario',
+      eval_cases=[
+          EvalCase(
+              eval_id='case-1',
+              conversation_scenario=ConversationScenario(
+                  starting_prompt='Hello', conversation_plan='Chat briefly.'
+              ),
+          )
+      ],
+  )
+
+  assert eval_set.eval_cases[0].conversation is None
+  _expand_prompt_templates(eval_set, tmp_path)
+  assert eval_set.eval_cases[0].conversation is None
 
 
 _TEMPLATED_TOML_EVALSET = '''\
