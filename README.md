@@ -7,7 +7,8 @@
 - `*.json` — the schema used by google-adk's `AgentEvaluator`.
 - `*.toml` — the same `EvalSet` schema, written in TOML.
 
-When a directory is passed, every `.json` and `.toml` file under it is loaded;
+When a directory is passed, every `.json` and `.toml` file under it is loaded
+(except the companion `test_config.json`, which holds eval metrics/criteria);
 the loader is chosen by extension (`.toml` → TOML, otherwise JSON). The
 recommended convention is still to name evalset files `*.test.json` /
 `*.test.toml` (this is what google-adk's `AgentEvaluator` looks for). A file

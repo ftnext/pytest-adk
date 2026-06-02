@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
+# ADK's companion config file (eval metrics / criteria), looked up by
+# ``find_config_for_test_file``. It lives next to evalsets as JSON but is not
+# itself an evalset, so it must be excluded from discovery.
+_CONFIG_FILE_NAME = 'test_config.json'
 
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
@@ -97,6 +101,8 @@ class AgentEvaluator:
     if os.path.isdir(eval_dataset_path):
       for root, _, files in os.walk(eval_dataset_path):
         for file in files:
+          if file == _CONFIG_FILE_NAME:
+            continue
           if file.endswith(('.json', '.toml')):
             test_files.append(os.path.join(root, file))
     else:
