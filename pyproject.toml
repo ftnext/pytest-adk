@@ -1,6 +1,6 @@
 [project]
 name = "pytest-adk"
-version = "0.0.3"
+version = "0.0.4"
 description = "Helpers for testing agents with Google's adk-python"
 authors = [
     { name = "ftnext", email = "takuyafjp+develop@gmail.com" }
