@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.artifacts.base_artifact_service import BaseArtifactService
@@ -60,12 +59,12 @@ async def runner_from_exported_session(
     agent: BaseAgent,
     exported: Session | str | Path,
     *,
-    app_name: Optional[str] = None,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    artifact_service: Optional[BaseArtifactService] = None,
-    memory_service: Optional[BaseMemoryService] = None,
-    credential_service: Optional[BaseCredentialService] = None,
+    app_name: str | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    artifact_service: BaseArtifactService | None = None,
+    memory_service: BaseMemoryService | None = None,
+    credential_service: BaseCredentialService | None = None,
 ) -> tuple[Runner, Session]:
   """Build an in-memory :class:`Runner` whose session service holds the export.
 
@@ -89,6 +88,10 @@ async def runner_from_exported_session(
   Returns:
       ``(runner, session)`` where ``session`` is the restored in-memory session
       (also reachable via ``runner.session_service.get_session``).
+
+  Raises:
+      FileNotFoundError: If ``exported`` is a path-like value that cannot be
+          loaded by :func:`load_session_from_json`.
   """
   if not isinstance(exported, Session):
     exported = load_session_from_json(exported)

@@ -22,6 +22,7 @@ import string
 from pathlib import Path
 
 from google.adk.evaluation.eval_set import EvalSet
+from google.genai import types
 
 # The whole (stripped) text value must be a single ``<prompt:...>`` marker; the
 # marker is not expanded when embedded inside other text.
@@ -77,7 +78,7 @@ def _expand_text(text: str | None, base_dir: Path) -> str | None:
     ) from error
 
 
-def _expand_content(content, base_dir: Path) -> None:
+def _expand_content(content: types.Content | None, base_dir: Path) -> None:
   """Expand prompt markers in every text part of ``content`` in place."""
   if content is None or not getattr(content, 'parts', None):
     return

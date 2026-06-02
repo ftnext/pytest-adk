@@ -37,7 +37,7 @@ def roll_die(sides: int, tool_context: ToolContext) -> int:
     An integer of the result of rolling the die.
   """
   result = random.randint(1, sides)
-  if not 'rolls' in tool_context.state:
+  if 'rolls' not in tool_context.state:
     tool_context.state['rolls'] = []
 
   tool_context.state['rolls'] = tool_context.state['rolls'] + [result]

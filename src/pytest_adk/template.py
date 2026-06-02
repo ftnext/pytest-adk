@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence
 
 import tomli_w
 from google.adk.evaluation.eval_case import EvalCase
@@ -64,6 +63,16 @@ def eval_set_template(fmt: str = 'toml') -> str:
   Uses snake_case keys (matching the documented examples) and drops ``None`` and
   default-valued fields. Dropping ``None`` is required for TOML, which has no
   null representation.
+
+  Args:
+      fmt: ``"toml"`` or ``"json"``. TOML is the default because it is easier
+          to edit for multi-line prompts.
+
+  Returns:
+      A serialized ADK ``EvalSet`` with ``REPLACE_ME`` placeholders.
+
+  Raises:
+      ValueError: If ``fmt`` is not one of the supported output formats.
   """
   if fmt not in _FORMATS:
     raise ValueError(f'Unsupported format {fmt!r}; choose one of {_FORMATS}.')
@@ -79,8 +88,13 @@ def eval_set_template(fmt: str = 'toml') -> str:
   return json.dumps(data, indent=2, ensure_ascii=False) + '\n'
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-  """CLI: print or write a fill-in evalset template."""
+def main(argv: Sequence[str] | None = None) -> None:
+  """Print or write a fill-in evalset template for the console script.
+
+  Args:
+      argv: Optional command-line arguments. ``None`` means use
+          :data:`sys.argv`, via :mod:`argparse`.
+  """
   parser = argparse.ArgumentParser(
       prog='pytest-adk-eval-schema',
       description='Generate a fill-in evalset template (EvalSet schema).',

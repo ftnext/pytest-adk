@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 try:
   import tomllib  # Python 3.11+
@@ -14,7 +13,9 @@ except ModuleNotFoundError:  # pragma: no cover
   import tomli as tomllib
 
 from google.adk.evaluation import AgentEvaluator as _AdkAgentEvaluator
+from google.adk.evaluation.eval_config import EvalConfig
 from google.adk.evaluation.eval_config import get_eval_metrics_from_config
+from google.adk.evaluation.eval_result import EvalCaseResult
 from google.adk.evaluation.eval_set import EvalSet
 from google.adk.evaluation.local_eval_set_results_manager import (
     LocalEvalSetResultsManager,
@@ -44,6 +45,12 @@ def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
 
   ``tomllib.load`` requires a binary handle, so we read text and use
   ``tomllib.loads`` to stay consistent with the rest of the package.
+
+  Args:
+      eval_set_file: Path to a TOML file containing the ADK ``EvalSet`` schema.
+
+  Returns:
+      The validated ADK ``EvalSet`` model.
   """
   data = tomllib.loads(Path(eval_set_file).read_text(encoding='utf-8'))
   return EvalSet.model_validate(data)
@@ -57,6 +64,12 @@ class _AgentEvaluator:
   """
 
   def __init__(self, results_dir: str | Path) -> None:
+    """Create an evaluator that writes ADK eval history under ``results_dir``.
+
+    Args:
+        results_dir: Base directory passed to ADK's local eval results manager.
+            The pytest fixture supplies pytest's per-test ``tmp_path``.
+    """
     self._results_dir = results_dir
 
   @property
@@ -80,8 +93,8 @@ class _AgentEvaluator:
       agent_module: str,
       eval_dataset_file_path_or_dir: str | Path,
       num_runs: int = _NUM_RUNS,
-      agent_name: Optional[str] = None,
-      initial_session_file: Optional[str] = None,
+      agent_name: str | None = None,
+      initial_session_file: str | None = None,
       print_detailed_results: bool = True,
   ) -> None:
     """Evaluate an ADK agent and save generated eval results to disk.
@@ -113,9 +126,24 @@ class _AgentEvaluator:
         https://nikkie-ftnext.hatenablog.com/entry/google-adk-python-evaluation-use-local-eval-set-results-manager
         The upstream ADK PR for optional eval result persistence is still open:
         https://github.com/google/adk-python/pull/4414
+
+    Args:
+        agent_module: Import path of the ADK agent module to evaluate.
+        eval_dataset_file_path_or_dir: Evalset file, or a directory searched
+            recursively for ``*.test.json`` and ``*.test.toml`` files.
+        num_runs: Number of ADK evaluation runs per eval case.
+        agent_name: Optional agent variable name inside ``agent_module``.
+        initial_session_file: Optional initial session file for JSON evalsets.
+            TOML evalsets reject this because they support the current
+            ``EvalSet`` schema only.
+        print_detailed_results: Whether ADK should print detailed metric output.
+
+    Raises:
+        AssertionError: If any ADK metric fails, after eval results have been
+            saved to disk.
     """
     eval_dataset_path = os.fspath(eval_dataset_file_path_or_dir)
-    test_files = []
+    test_files: list[str] = []
     if os.path.isdir(eval_dataset_path):
       # When a directory is given, only the ADK naming convention
       # (``.test.json`` / ``.test.toml``) is picked up recursively. This keeps
@@ -178,12 +206,13 @@ class _AgentEvaluator:
       self,
       *,
       agent_module: str,
-      eval_set,
-      eval_config,
+      eval_set: EvalSet,
+      eval_config: EvalConfig,
       num_runs: int,
-      agent_name: Optional[str],
+      agent_name: str | None,
       print_detailed_results: bool,
   ) -> None:
+    """Run ADK evaluation for one ``EvalSet``, persist it, then assert metrics."""
     agent_for_eval = await _AdkAgentEvaluator._get_agent_for_eval(
         module_name=agent_module, agent_name=agent_name
     )
@@ -205,7 +234,7 @@ class _AgentEvaluator:
     results_manager = LocalEvalSetResultsManager(
         agents_dir=os.fspath(self._results_dir)
     )
-    all_eval_results = [
+    all_eval_results: list[EvalCaseResult] = [
         result
         for eval_results_per_eval_id in eval_results_by_eval_id.values()
         for result in eval_results_per_eval_id

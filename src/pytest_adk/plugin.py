@@ -3,17 +3,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import pytest
 
 from .evaluation import _AgentEvaluator
 
+if TYPE_CHECKING:
+  from _pytest.config import Config
+  from _pytest.fixtures import FixtureRequest
+  from _pytest.terminal import TerminalReporter
+
 # Session-wide map of test node id -> eval_history directory, populated as each
 # ``AgentEvaluator`` fixture tears down and rendered by ``pytest_terminal_summary``.
-_EVAL_RESULTS_DIRS = pytest.StashKey[dict]()
+_EVAL_RESULTS_DIRS = pytest.StashKey[dict[str, Path]]()
 
 
 @pytest.fixture
-def AgentEvaluator(request, tmp_path):  # noqa: N802 (fixture deliberately named like a class)
+def AgentEvaluator(  # noqa: N802 (fixture deliberately named like a class)
+    request: FixtureRequest,
+    tmp_path: Path,
+) -> Iterator[_AgentEvaluator]:
   """Return an evaluator bound to pytest's ``tmp_path`` as the results dir.
 
   Eval result JSON files are written under
@@ -28,7 +40,11 @@ def AgentEvaluator(request, tmp_path):  # noqa: N802 (fixture deliberately named
     store[request.node.nodeid] = eval_history_dir
 
 
-def pytest_terminal_summary(terminalreporter, exitstatus, config):
+def pytest_terminal_summary(
+    terminalreporter: TerminalReporter,
+    exitstatus: int,
+    config: Config,
+) -> None:
   """Report, per test, where ADK eval results were saved.
 
   Runs regardless of test outcome, so the results location is always visible.

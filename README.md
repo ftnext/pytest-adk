@@ -1,5 +1,27 @@
 # pytest-adk
 
+Pytest helpers for evaluating agents built with
+[Google ADK](https://github.com/google/adk-python). The package provides:
+
+- an auto-registered `AgentEvaluator` pytest fixture that saves ADK eval result
+  JSON files under each test's `tmp_path`;
+- TOML evalset support, including multi-line prompts;
+- external prompt templates for repeated evalset text;
+- a `pytest-adk-eval-schema` CLI for generating fill-in evalset templates;
+- helpers for resuming an exported ADK session with an in-memory `Runner`.
+
+## Installation
+
+```bash
+pip install pytest-adk
+```
+
+For development and tests, install the `dev` extra:
+
+```bash
+pip install "pytest-adk[dev]"
+```
+
 ## Usage
 
 `AgentEvaluator` is a pytest fixture, auto-registered via the `pytest11` entry
@@ -138,3 +160,64 @@ Details:
 - It is an **error** if the prompt file is missing, a `KEY=VALUE` pair is
   malformed, or the prompt references a variable that the marker does not
   provide.
+
+## Generate an evalset template
+
+Use `pytest-adk-eval-schema` to generate a minimal `EvalSet` file with
+`REPLACE_ME` placeholders:
+
+```bash
+pytest-adk-eval-schema -o tests/evals/example.test.toml
+```
+
+TOML is the default output format. JSON is also available:
+
+```bash
+pytest-adk-eval-schema --format json
+```
+
+The command refuses to overwrite an existing file unless you pass `--force`.
+The same generator is available from Python:
+
+```python
+from pytest_adk import eval_set_template
+
+template = eval_set_template("toml")
+```
+
+## Resume an exported ADK session
+
+`load_session_from_json` reads a session exported by ADK from either a file path
+or a raw JSON string. `runner_from_exported_session` restores that session into
+an in-memory ADK `Runner`, copying the exported state and replaying events via
+the session service.
+
+```python
+from pathlib import Path
+
+from google.genai import types
+from pytest_adk import runner_from_exported_session
+from your_agent.agent import root_agent
+
+
+async def test_resume_exported_session():
+    runner, session = await runner_from_exported_session(
+        root_agent,
+        Path("tests/fixtures/roll_die.session.json"),
+    )
+
+    events = runner.run_async(
+        user_id=session.user_id,
+        session_id=session.id,
+        new_message=types.Content(
+            role="user",
+            parts=[types.Part(text="What numbers did I get?")],
+        ),
+    )
+    async for _ in events:
+        pass
+```
+
+You can override `app_name`, `user_id`, or `session_id` when restoring, and you
+can pass custom artifact, memory, or credential services. If you do not provide
+services, in-memory ADK services are used.
