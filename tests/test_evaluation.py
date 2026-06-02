@@ -70,7 +70,7 @@ def _patch_successful_adk_eval(monkeypatch, *, seen_test_files=None) -> None:
   def load_eval_set(test_file, eval_config, initial_session):
     if seen_test_files is not None:
       seen_test_files.append(test_file)
-    return SimpleNamespace(eval_set_id=Path(test_file).stem)
+    return SimpleNamespace(eval_set_id=Path(test_file).stem, eval_cases=[])
 
   monkeypatch.setattr(
       evaluation_module._AdkAgentEvaluator,
