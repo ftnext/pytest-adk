@@ -7,6 +7,21 @@
 - `*.test.json` — the schema used by google-adk's `AgentEvaluator`.
 - `*.test.toml` — the same `EvalSet` schema, written in TOML.
 
+How `eval_dataset_file_path_or_dir` is interpreted depends on whether it points
+at a directory or a single file:
+
+- **Directory**: only files matching the `*.test.json` / `*.test.toml` naming
+  convention are discovered, recursively. The `.test.` infix is required, so
+  sibling files such as `test_config.json` (eval metrics) and the
+  `*.evalset_result.json` files written by this helper are naturally excluded —
+  no special-casing needed. A plain `data.json` without `.test.` is **not**
+  picked up.
+- **Single file**: any `.json` or `.toml` file is accepted, since pointing at a
+  file is an explicit choice. If the path does not contain `.test.`, a
+  `logging.warning` is emitted (under the `pytest_adk.evaluation` logger) noting
+  that it falls outside the naming convention, and the file is loaded anyway.
+  The loader is chosen by extension: `.toml` → TOML, otherwise JSON.
+
 TOML is handy when a user prompt spans multiple lines: TOML multi-line strings
 (`"""..."""`) keep newlines readable, instead of JSON's `\n`-escaped one-liners.
 Like JSON, TOML is parsed with the standard library (`tomllib`, Python 3.11+; on
