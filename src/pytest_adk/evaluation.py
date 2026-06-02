@@ -22,6 +22,8 @@ from google.adk.evaluation.simulation.user_simulator_provider import (
     UserSimulatorProvider,
 )
 
+from .prompt_template import _expand_prompt_templates
+
 _EVAL_APP_NAME = 'test_app'
 _NUM_RUNS = 2
 
@@ -114,6 +116,10 @@ class AgentEvaluator:
         eval_set = _AdkAgentEvaluator._load_eval_set_from_file(
             test_file, eval_config, initial_session
         )
+
+      eval_set = _expand_prompt_templates(
+          eval_set, Path(test_file).parent
+      )
 
       await AgentEvaluator._evaluate_eval_set_and_save(
           agent_module=agent_module,

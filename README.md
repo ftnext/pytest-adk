@@ -43,3 +43,47 @@ Notes:
   are not handled. Express the initial session inside the `EvalSet` instead.
 - The companion `test_config.json` (eval metrics / criteria) is unchanged; only
   the evalset data file gains TOML support.
+
+## Prompt templates
+
+When several eval cases share the same (often long) prompt, you can keep the
+prompt in a separate file and reference it from a `text` field. If the **entire**
+value of a `text` field is a `<prompt:...>` marker, `AgentEvaluator.evaluate`
+reads the referenced file, substitutes its variables, and replaces the marker
+with the rendered prompt *before* the evalset reaches the evaluator.
+
+Marker syntax:
+
+```
+<prompt:FILENAME [KEY=VALUE ...]>
+```
+
+Given `prompt.txt`:
+
+```text
+Please turn on the ${ROOM} light.
+Then confirm it is ${STATE}.
+```
+
+an evalset can reference it like this:
+
+```toml
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = "<prompt:prompt.txt ROOM=living STATE=on>" } ]
+```
+
+After expansion the agent sees the fully rendered prompt. This works for both
+`*.test.toml` and `*.test.json` evalsets, and applies to both `user_content` and
+`final_response` text parts.
+
+Details:
+
+- **Variables** use `string.Template` syntax: `${VAR}` (or `$VAR`).
+- `FILENAME` is resolved **relative to the evalset file's directory**.
+- The marker must be the **whole** `text` value (leading/trailing whitespace is
+  ignored); markers embedded inside other text are not expanded.
+- `KEY=VALUE` pairs are **space-separated**, so values cannot contain spaces.
+- It is an **error** if the prompt file is missing, a `KEY=VALUE` pair is
+  malformed, or the prompt references a variable that the marker does not
+  provide.
