@@ -336,6 +336,31 @@ async def test_agent_evaluator_directory_excludes_test_config_json(
 
 
 @pytest.mark.asyncio
+async def test_agent_evaluator_directory_excludes_saved_result_files(
+    tmp_path, monkeypatch
+) -> None:
+  seen_test_files = []
+  evalset = tmp_path / 'cases.test.json'
+  evalset.write_text('{}', encoding='utf-8')
+  # Simulate a previous run whose results_dir is nested in the eval directory.
+  history = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  history.mkdir(parents=True)
+  (history / 'cases.2026.evalset_result.json').write_text(
+      '{}', encoding='utf-8'
+  )
+  _patch_successful_adk_eval(monkeypatch, seen_test_files=seen_test_files)
+
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=tmp_path,
+      num_runs=1,
+      results_dir=tmp_path,
+  )
+
+  assert seen_test_files == [str(evalset)]
+
+
+@pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_json_and_toml(
     tmp_path, monkeypatch
 ) -> None:
