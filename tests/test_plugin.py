@@ -58,3 +58,60 @@ def test_terminal_summary_silent_when_nothing_recorded() -> None:
 
   assert reporter.seps == []
   assert reporter.lines == []
+
+
+def test_default_prompt_template_engine_is_string(tmp_path) -> None:
+  evaluator = _AgentEvaluator(results_dir=tmp_path)
+
+  assert evaluator._prompt_template_engine == 'string'
+
+
+def test_ini_option_selects_prompt_template_engine(pytester) -> None:
+  pytester.makepyprojecttoml(
+      """
+      [tool.pytest.ini_options]
+      pytest_adk_prompt_template_engine = "jinja"
+      """
+  )
+  pytester.makepyfile(
+      """
+      def test_engine(AgentEvaluator):
+          assert AgentEvaluator._prompt_template_engine == "jinja"
+      """
+  )
+
+  result = pytester.runpytest_subprocess()
+
+  result.assert_outcomes(passed=1)
+
+
+def test_ini_option_defaults_to_string_engine(pytester) -> None:
+  pytester.makepyfile(
+      """
+      def test_engine(AgentEvaluator):
+          assert AgentEvaluator._prompt_template_engine == "string"
+      """
+  )
+
+  result = pytester.runpytest_subprocess()
+
+  result.assert_outcomes(passed=1)
+
+
+def test_invalid_ini_option_value_errors(pytester) -> None:
+  pytester.makepyprojecttoml(
+      """
+      [tool.pytest.ini_options]
+      pytest_adk_prompt_template_engine = "mako"
+      """
+  )
+  pytester.makepyfile(
+      """
+      def test_engine(AgentEvaluator):
+          pass
+      """
+  )
+
+  result = pytester.runpytest_subprocess()
+
+  result.assert_outcomes(errors=1)

@@ -6,7 +6,8 @@ Pytest helpers for evaluating agents built with
 - an auto-registered `AgentEvaluator` pytest fixture that saves ADK eval result
   JSON files under each test's `tmp_path`;
 - TOML evalset support, including multi-line prompts;
-- external prompt templates for repeated evalset text;
+- external prompt templates for repeated evalset text, rendered with
+  `string.Template` by default or optionally with Jinja2;
 - a `pytest-adk-eval-schema` CLI for generating fill-in evalset templates;
 - helpers for resuming an exported ADK session with an in-memory `Runner`.
 
@@ -152,7 +153,7 @@ After expansion the agent sees the fully rendered prompt. This works for both
 
 Details:
 
-- **Variables** use `string.Template` syntax: `${VAR}` (or `$VAR`).
+- **Variables** use `string.Template` syntax by default: `${VAR}` (or `$VAR`).
 - `FILENAME` is resolved **relative to the evalset file's directory**.
 - The marker must be the **whole** `text` value (leading/trailing whitespace is
   ignored); markers embedded inside other text are not expanded.
@@ -160,6 +161,33 @@ Details:
 - It is an **error** if the prompt file is missing, a `KEY=VALUE` pair is
   malformed, or the prompt references a variable that the marker does not
   provide.
+
+### Jinja prompt templates
+
+By default the prompt file is rendered with `string.Template` (`${VAR}`). To use
+Jinja2 (`{{ VAR }}`) syntax instead, install the optional extra and opt in via
+the `pytest_adk_prompt_template_engine` ini option in `pyproject.toml`:
+
+```console
+pip install "pytest-adk[jinja]"
+```
+
+```toml
+[tool.pytest.ini_options]
+pytest_adk_prompt_template_engine = "jinja"
+```
+
+With the Jinja engine selected, the same `prompt.txt` would be written as:
+
+```text
+Please turn on the {{ ROOM }} light.
+Then confirm it is {{ STATE }}.
+```
+
+The marker syntax (`<prompt:FILENAME KEY=VALUE ...>`) is unchanged; only the
+placeholder syntax inside the prompt file differs. Referencing a variable that
+the marker does not provide is an **error** (Jinja runs with
+`StrictUndefined`).
 
 ## Generate an evalset template
 
