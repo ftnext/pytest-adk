@@ -63,14 +63,23 @@ class _AgentEvaluator:
   it to pytest's ``tmp_path`` (see :mod:`pytest_adk.plugin`).
   """
 
-  def __init__(self, results_dir: str | Path) -> None:
+  def __init__(
+      self,
+      results_dir: str | Path,
+      prompt_template_engine: str = 'string',
+  ) -> None:
     """Create an evaluator that writes ADK eval history under ``results_dir``.
 
     Args:
         results_dir: Base directory passed to ADK's local eval results manager.
             The pytest fixture supplies pytest's per-test ``tmp_path``.
+        prompt_template_engine: Engine used to render ``<prompt:...>`` markers,
+            either ``'string'`` (default, ``string.Template``) or ``'jinja'``.
+            The pytest fixture supplies the value of the
+            ``pytest_adk_prompt_template_engine`` ini option.
     """
     self._results_dir = results_dir
+    self._prompt_template_engine = prompt_template_engine
 
   @property
   def results_dir(self) -> str | Path:
@@ -190,7 +199,7 @@ class _AgentEvaluator:
         )
 
       eval_set = _expand_prompt_templates(
-          eval_set, Path(test_file).parent
+          eval_set, Path(test_file).parent, self._prompt_template_engine
       )
 
       await self._evaluate_eval_set_and_save(

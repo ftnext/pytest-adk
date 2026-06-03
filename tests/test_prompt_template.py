@@ -146,3 +146,38 @@ def test_toml_evalset_is_expanded_via_loader(tmp_path) -> None:
 
   text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
   assert text == 'Please turn on the living light.'
+
+
+def test_jinja_engine_expands_double_brace_placeholders(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Turn on {{ VAR1 }}. Then say {{ VAR2 }}.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1=foo VAR2=ほげ>')
+
+  _expand_prompt_templates(eval_set, tmp_path, 'jinja')
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Turn on foo. Then say ほげ.'
+
+
+def test_jinja_engine_undefined_variable_raises(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      '{{ VAR1 }} and {{ VAR3 }}', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1=foo>')
+
+  with pytest.raises(ValueError, match='Jinja'):
+    _expand_prompt_templates(eval_set, tmp_path, 'jinja')
+
+
+def test_string_engine_leaves_double_braces_untouched(tmp_path) -> None:
+  # The default engine ignores Jinja-style placeholders; only ${VAR} expands.
+  (tmp_path / 'prompt.txt').write_text(
+      'Keep {{ VAR1 }} but expand ${VAR1}', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1=foo>')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Keep {{ VAR1 }} but expand foo'
