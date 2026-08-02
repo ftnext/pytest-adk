@@ -314,3 +314,58 @@ async def test_async_context_manager_closes_client() -> None:
   async with _client(handler) as client:
     assert await client.list_apps() == []
   assert client._client.is_closed
+
+
+async def test_create_session_escapes_reserved_path_characters() -> None:
+  """A user_id containing '/' must address one user, not a deeper subpath."""
+  captured: dict[str, Any] = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured['raw_path'] = request.url.raw_path.decode('ascii')
+    return httpx.Response(
+        200,
+        json={
+            'id': 's1',
+            'appName': 'weather_agent',
+            'userId': 'teams/acme',
+            'state': {},
+            'events': [],
+            'lastUpdateTime': 0.0,
+        },
+    )
+
+  client = _client(handler)
+  try:
+    await client.create_session(app_name='weather_agent', user_id='teams/acme')
+  finally:
+    await client.aclose()
+
+  assert (
+      captured['raw_path']
+      == '/apps/weather_agent/users/teams%2Facme/sessions'
+  )
+
+
+async def test_delete_session_escapes_reserved_path_characters() -> None:
+  """'..' segments must not be resolved away against the preceding segment."""
+  captured: dict[str, Any] = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured['raw_path'] = request.url.raw_path.decode('ascii')
+    return httpx.Response(200)
+
+  client = _client(handler)
+  try:
+    await client.delete_session(
+        app_name='weather_agent', user_id='..', session_id='a b/c'
+    )
+  finally:
+    await client.aclose()
+
+  # Without escaping, httpx resolves '..' away against '/users' (yielding
+  # /apps/weather_agent/sessions/...) and splits 'a b/c' across two segments,
+  # so the request would hit a different endpoint entirely.
+  assert (
+      captured['raw_path']
+      == '/apps/weather_agent/users/%2E%2E/sessions/a%20b%2Fc'
+  )

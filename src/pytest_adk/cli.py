@@ -118,6 +118,17 @@ def _header(value: str) -> tuple[str, str]:
     raise argparse.ArgumentTypeError(
         f"--header must have a non-empty header name, got {value!r}."
     )
+  # httpx encodes header names/values as ASCII and raises UnicodeEncodeError
+  # from the AsyncClient constructor otherwise. That construction happens
+  # outside _run_eval's try block, so without this check a non-ASCII header
+  # would abort with a traceback and exit 1 -- which automation reads as a
+  # metric failure -- rather than the documented execution-error code.
+  for part, label in ((name, 'name'), (header_value, 'value')):
+    if not part.isascii():
+      raise argparse.ArgumentTypeError(
+          f'--header {label} must be ASCII (HTTP headers are not UTF-8),'
+          f' got {value!r}.'
+      )
   return name, header_value
 
 
@@ -303,15 +314,28 @@ async def _run_eval(
     return EXIT_ERROR
 
   headers = dict(args.headers) if args.headers else None
-  client = AdkApiClient(
-      args.agent_url,
-      headers=headers,
-      timeout=args.timeout,
-      transport=transport,
-  )
+  try:
+    client = AdkApiClient(
+        args.agent_url,
+        headers=headers,
+        timeout=args.timeout,
+        transport=transport,
+    )
+  except Exception as e:  # noqa: BLE001 - a bad client config is a user error
+    # Defense in depth behind the argparse-level AGENT_URL/--header checks:
+    # any other httpx rejection of the connection parameters should still be
+    # an execution error rather than a traceback.
+    print(f'Failed to set up the HTTP client: {e}', file=sys.stderr)
+    return EXIT_ERROR
+
   try:
     app_name = await _resolve_app_name(client, args.app_name)
     if app_name is None:
+      return EXIT_ERROR
+
+    app_name_error = _app_name_path_error(app_name)
+    if app_name_error is not None:
+      print(app_name_error, file=sys.stderr)
       return EXIT_ERROR
 
     eval_sets = _load_eval_sets(
@@ -383,21 +407,32 @@ async def _run_eval(
 
     had_inference_failure = False
     had_metric_failure = False
-    for eval_set, eval_config in eval_sets:
-      set_had_inference_failure, set_had_metric_failure = (
-          await _run_and_evaluate_eval_set(
-              service,
-              results_manager,
-              app_name=app_name,
-              eval_set=eval_set,
-              eval_config=eval_config,
-              num_runs=args.num_runs,
-              parallelism=args.parallelism,
-              print_detailed_results=args.print_detailed_results,
-          )
-      )
-      had_inference_failure = had_inference_failure or set_had_inference_failure
-      had_metric_failure = had_metric_failure or set_had_metric_failure
+    try:
+      for eval_set, eval_config in eval_sets:
+        set_had_inference_failure, set_had_metric_failure = (
+            await _run_and_evaluate_eval_set(
+                service,
+                results_manager,
+                app_name=app_name,
+                eval_set=eval_set,
+                eval_config=eval_config,
+                num_runs=args.num_runs,
+                parallelism=args.parallelism,
+                print_detailed_results=args.print_detailed_results,
+            )
+        )
+        had_inference_failure = (
+            had_inference_failure or set_had_inference_failure
+        )
+        had_metric_failure = had_metric_failure or set_had_metric_failure
+    except Exception as e:  # noqa: BLE001 - scoring/persistence failed outright
+      # Scoring or writing the results failed (e.g. --results-dir is not
+      # writable, so save_eval_set_result raises OSError). Without this, the
+      # console script would exit 1 on the traceback -- indistinguishable to
+      # automation from "a metric failed" -- even though no verdict was
+      # actually reached.
+      print(f'Evaluation failed: {e}', file=sys.stderr)
+      return EXIT_ERROR
   finally:
     await client.aclose()
 
@@ -455,6 +490,40 @@ async def _resolve_app_name(
         file=sys.stderr,
     )
   return None
+
+
+def _app_name_path_error(app_name: str) -> str | None:
+  """Returns an error message if ``app_name`` is unsafe as a path segment.
+
+  ``LocalEvalSetResultsManager`` builds ``{results_dir}/{app_name}/.adk/
+  eval_history/`` from this value, so a name containing a separator or a
+  traversal segment would write results outside ``--results-dir``. That
+  matters because the name can come from the *remote* server's
+  ``GET /list-apps``, not just from ``--app-name``.
+
+  google-adk v2 rejects such names itself (``validate_path_segment``), but
+  v1 does not -- it happily writes outside the directory -- so this check is
+  what makes the behavior the same on both. Its rules mirror v2's.
+
+  Returns:
+      ``None`` if the name is safe, otherwise a ready-to-print message.
+  """
+  reason = None
+  if not app_name:
+    reason = 'must not be empty'
+  elif '\x00' in app_name:
+    reason = 'must not contain null bytes'
+  elif '/' in app_name or '\\' in app_name:
+    reason = 'must not contain path separators'
+  elif app_name in ('.', '..'):
+    reason = 'must not be a path traversal segment'
+  if reason is None:
+    return None
+  return (
+      f'Refusing to use app name {app_name!r}: it {reason}, and eval results'
+      ' are written to {results-dir}/{app-name}/.adk/eval_history/. Pass a'
+      ' plain app name via --app-name.'
+  )
 
 
 def _load_eval_sets(

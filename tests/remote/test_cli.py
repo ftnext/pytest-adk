@@ -735,3 +735,117 @@ def test_invalid_prompt_template_engine_is_an_argparse_error(
 
   assert raised
   assert 'mustache' in capsys.readouterr().err
+
+
+def test_non_ascii_header_is_an_argparse_error(tmp_path, capsys) -> None:
+  """httpx rejects non-ASCII headers when the client is built, outside the try."""
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main([
+        'eval',
+        _AGENT_URL,
+        str(evalset_path),
+        '--header',
+        'X-Label: café',
+    ])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+  assert 'ASCII' in capsys.readouterr().err
+
+
+def test_path_like_app_name_from_server_is_rejected(tmp_path, capsys) -> None:
+  """A remote-supplied '..' app name must not escape --results-dir.
+
+  google-adk v2 rejects this itself, but v1 writes the result file outside the
+  requested directory, so the CLI checks before persisting either way.
+  """
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer(app_names=['..'])  # sole app -> auto-resolved
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+  results_dir.mkdir()
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'Refusing to use app name' in err
+  # Nothing was written anywhere -- neither inside nor outside results_dir.
+  assert list(results_dir.rglob('*.json')) == []
+  assert list(tmp_path.glob('.adk/**/*.json')) == []
+  # Rejected before any inference was attempted.
+  assert server.run_requests == []
+
+
+def test_explicit_app_name_with_separator_is_rejected(tmp_path, capsys) -> None:
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          'a/../../b',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  assert 'Refusing to use app name' in capsys.readouterr().err
+  assert not results_dir.exists()
+
+
+def test_unwritable_results_dir_exits_two(tmp_path, capsys) -> None:
+  """A persistence failure must be an execution error, not exit 1.
+
+  Exit 1 means "a metric failed"; automation would otherwise read a failed
+  results write as a real evaluation verdict.
+  """
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  # A *file* where the results directory should be: creating
+  # {results_dir}/{app_name}/.adk/eval_history/ under it raises OSError.
+  results_dir = tmp_path / 'results-as-a-file'
+  results_dir.write_text('not a directory', encoding='utf-8')
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  assert 'Evaluation failed' in capsys.readouterr().err

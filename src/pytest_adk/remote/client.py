@@ -31,6 +31,7 @@ it only ever *speaks* the same wire format.
 
 from __future__ import annotations
 
+import urllib.parse
 from types import TracebackType
 from typing import Any
 
@@ -38,6 +39,27 @@ import httpx
 from google.adk.events import Event
 from google.adk.sessions import Session
 from google.genai import types
+
+
+def _quote(path_segment: str) -> str:
+  """Percent-encode one dynamic REST path segment.
+
+  ``safe=''`` because these values are single path segments: a ``user_id`` of
+  ``'teams/acme'`` must address one user, not the ``/users/teams/acme/``
+  subpath. httpx escapes some characters when normalizing a URL (a space
+  becomes ``%20``) but leaves ``/`` alone, and silently resolves ``..``
+  against the preceding segment -- so the encoding has to happen here.
+
+  Dots are *unreserved* in RFC 3986, so ``quote()`` alone leaves ``'.'`` and
+  ``'..'`` intact and the dot-segment removal in URL resolution would still
+  drop or rewrite them. An all-dots segment therefore gets its dots
+  percent-encoded explicitly; ``%2E`` is equivalent to ``.`` for a server
+  decoding the segment, but is no longer a dot-segment during resolution.
+  """
+  quoted = urllib.parse.quote(path_segment, safe='')
+  if quoted and set(quoted) == {'.'}:
+    return quoted.replace('.', '%2E')
+  return quoted
 
 
 class AdkApiClient:
@@ -149,7 +171,7 @@ class AdkApiClient:
     if state is not None:
       body['state'] = state
     response = await self._client.post(
-        f'/apps/{app_name}/users/{user_id}/sessions',
+        f'/apps/{_quote(app_name)}/users/{_quote(user_id)}/sessions',
         json=body,
     )
     response.raise_for_status()
@@ -205,6 +227,7 @@ class AdkApiClient:
         httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
     """
     response = await self._client.delete(
-        f'/apps/{app_name}/users/{user_id}/sessions/{session_id}'
+        f'/apps/{_quote(app_name)}/users/{_quote(user_id)}'
+        f'/sessions/{_quote(session_id)}'
     )
     response.raise_for_status()

@@ -311,7 +311,13 @@ The command exits `0` if every eval metric passed, `1` if at least one metric
 failed, and `2` on an execution error (bad `AGENT_URL`, a connection failure,
 `--app-name` resolution failure, an evalset or `--config-file-path` that cannot
 be loaded, `EVAL_SET_PATH`s that discover no evalset at all, two evalsets
-sharing one `eval_set_id`, or any eval case whose inference failed).
+sharing one `eval_set_id`, an app name that is unusable as a path segment, a
+failure to write the results, or any eval case whose inference failed).
+
+Because the app name can come from the remote server (`GET /list-apps`) and is
+used as a directory name, one containing a path separator or a `..` traversal
+segment is rejected rather than allowed to write results outside
+`--results-dir`.
 
 Scoring always runs locally: LLM-as-judge metrics use your own API key and
 billing, and only inference is delegated to the remote server.
