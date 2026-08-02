@@ -61,6 +61,7 @@ def _collect_eval_sets(
     *,
     prompt_template_engine: str = 'string',
     initial_session_file: str | None = None,
+    eval_config_override: EvalConfig | None = None,
 ) -> list[tuple[EvalSet, EvalConfig]]:
   """Load evalset files into ``(EvalSet, EvalConfig)`` pairs.
 
@@ -79,6 +80,11 @@ def _collect_eval_sets(
       initial_session_file: Optional initial session file for JSON evalsets.
           TOML evalsets reject this because they support the current
           ``EvalSet`` schema only.
+      eval_config_override: When given, this config is used for every evalset
+          and the sibling ``test_config.json`` discovery is skipped entirely.
+          The CLI passes ``--config-file-path`` here: without it, an
+          unloadable sibling config would abort the run even though the
+          caller supplied an explicit config meant to replace it.
 
   Returns:
       A list of ``(EvalSet, EvalConfig)`` pairs, one per discovered evalset
@@ -123,7 +129,11 @@ def _collect_eval_sets(
           test_file,
       )
 
-    eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
+    eval_config = (
+        eval_config_override
+        if eval_config_override is not None
+        else _AdkAgentEvaluator.find_config_for_test_file(test_file)
+    )
     if test_file.endswith('.toml'):
       assert len(initial_session) == 0, (
           'Initial session should be specified as a part of the EvalSet file.'

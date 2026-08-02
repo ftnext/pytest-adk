@@ -338,13 +338,12 @@ async def _run_eval(
       print(app_name_error, file=sys.stderr)
       return EXIT_ERROR
 
-    eval_sets = _load_eval_sets(
-        args.eval_set_paths,
-        prompt_template_engine=args.prompt_template_engine,
-    )
-    if eval_sets is None:
-      return EXIT_ERROR
-
+    # The override is loaded *before* the evalsets and threaded into
+    # _collect_eval_sets, which otherwise calls find_config_for_test_file()
+    # for every file: an unloadable sibling test_config.json would abort the
+    # run even though --config-file-path supplies the config meant to replace
+    # it.
+    override_config = None
     if args.config_file_path:
       try:
         override_config = get_evaluation_criteria_or_default(
@@ -359,7 +358,32 @@ async def _run_eval(
             file=sys.stderr,
         )
         return EXIT_ERROR
-      eval_sets = [(eval_set, override_config) for eval_set, _ in eval_sets]
+
+    eval_sets = _load_eval_sets(
+        args.eval_set_paths,
+        prompt_template_engine=args.prompt_template_engine,
+        eval_config_override=override_config,
+    )
+    if eval_sets is None:
+      return EXIT_ERROR
+
+    empty_eval_set_ids = [
+        eval_set.eval_set_id
+        for eval_set, _ in eval_sets
+        if not eval_set.eval_cases
+    ]
+    if empty_eval_set_ids:
+      # perform_inference() yields nothing for a case-less eval set, so
+      # success_results stays empty, evaluate() is skipped, and both failure
+      # flags stay false -- the command would print that results were saved
+      # and exit EXIT_SUCCESS having scored nothing.
+      print(
+          'Evalset(s) with no eval cases:'
+          f' {", ".join(repr(i) for i in empty_eval_set_ids)}. There would be'
+          ' nothing to run or score, so no result can be reported.',
+          file=sys.stderr,
+      )
+      return EXIT_ERROR
 
     duplicate_eval_set_id = _find_duplicate_eval_set_id(eval_sets)
     if duplicate_eval_set_id is not None:
@@ -530,6 +554,7 @@ def _load_eval_sets(
     eval_set_paths: Sequence[str],
     *,
     prompt_template_engine: str = _DEFAULT_PROMPT_TEMPLATE_ENGINE,
+    eval_config_override: EvalConfig | None = None,
 ) -> list[tuple[EvalSet, EvalConfig]] | None:
   """Loads every evalset from ``eval_set_paths`` via ``_collect_eval_sets``.
 
@@ -538,6 +563,8 @@ def _load_eval_sets(
           file or a directory searched recursively.
       prompt_template_engine: Engine used to render ``<prompt:...>`` markers,
           from ``--prompt-template-engine``.
+      eval_config_override: ``--config-file-path``'s already-loaded config,
+          which replaces sibling ``test_config.json`` discovery when set.
 
   Returns:
       The concatenated ``(EvalSet, EvalConfig)`` pairs, in argument order, or
@@ -547,27 +574,28 @@ def _load_eval_sets(
   eval_sets: list[tuple[EvalSet, EvalConfig]] = []
   for eval_set_path in eval_set_paths:
     try:
-      eval_sets.extend(
-          _collect_eval_sets(
-              eval_set_path, prompt_template_engine=prompt_template_engine
-          )
+      path_eval_sets = _collect_eval_sets(
+          eval_set_path,
+          prompt_template_engine=prompt_template_engine,
+          eval_config_override=eval_config_override,
       )
     except Exception as e:  # noqa: BLE001 - surface any load failure to the user
       print(f'Failed to load evalset(s) from {eval_set_path!r}: {e}', file=sys.stderr)
       return None
 
-  if not eval_sets:
-    # Every given path existed but nothing matched the naming convention (a
-    # directory with no *.test.json / *.test.toml files, e.g. because they are
-    # misnamed). Returning an empty list here would run no inference at all and
-    # still exit EXIT_SUCCESS, falsely reporting that every metric passed.
-    print(
-        'No evalsets found in'
-        f' {", ".join(repr(path) for path in eval_set_paths)}. Directories are'
-        ' searched recursively for files named *.test.json / *.test.toml.',
-        file=sys.stderr,
-    )
-    return None
+    # Checked per path, not just on the aggregate: with several EVAL_SET_PATHs
+    # a populated one would otherwise mask a directory that contributed
+    # nothing (e.g. its files are misnamed), silently evaluating a subset and
+    # still exiting EXIT_SUCCESS.
+    if not path_eval_sets:
+      print(
+          f'No evalsets found in {eval_set_path!r}. Directories are searched'
+          ' recursively for files named *.test.json / *.test.toml.',
+          file=sys.stderr,
+      )
+      return None
+
+    eval_sets.extend(path_eval_sets)
   return eval_sets
 
 

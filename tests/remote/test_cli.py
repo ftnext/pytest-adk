@@ -849,3 +849,127 @@ def test_unwritable_results_dir_exits_two(tmp_path, capsys) -> None:
 
   assert exit_code == 2
   assert 'Evaluation failed' in capsys.readouterr().err
+
+
+def test_one_empty_path_among_several_exits_two(tmp_path, capsys) -> None:
+  """A populated path must not mask a sibling path that found nothing."""
+  populated = tmp_path / 'populated'
+  populated.mkdir()
+  (populated / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  (populated / 'weather.test.toml').write_text(
+      _WEATHER_EVAL_SET_TOML, encoding='utf-8'
+  )
+  empty = tmp_path / 'empty'
+  empty.mkdir()
+  # Misnamed, so directory discovery skips it.
+  (empty / 'other.toml').write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(populated),
+          str(empty),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'No evalsets found' in err
+  assert 'empty' in err
+  # Rejected before running the subset that *was* found.
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_evalset_with_no_eval_cases_exits_two(tmp_path, capsys) -> None:
+  """A case-less evalset would score nothing yet report success."""
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'empty.test.toml'
+  evalset_path.write_text(
+      'eval_set_id = "empty_set"\neval_cases = []\n', encoding='utf-8'
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'no eval cases' in err
+  assert 'empty_set' in err
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_config_file_path_override_skips_broken_sibling_config(
+    tmp_path, capsys
+) -> None:
+  """An explicit --config-file-path replaces sibling discovery entirely.
+
+  The sibling test_config.json is malformed, which previously aborted the run
+  inside _collect_eval_sets even though the caller supplied a valid config
+  meant to take its place.
+  """
+  evalset_dir = tmp_path / 'evals'
+  evalset_dir.mkdir()
+  (evalset_dir / 'test_config.json').write_text(
+      '{not valid json', encoding='utf-8'
+  )
+  evalset_path = evalset_dir / 'weather.test.toml'
+  evalset_path.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+
+  good_config = tmp_path / 'good_config.json'
+  good_config.write_text(_TEST_CONFIG_JSON, encoding='utf-8')
+
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--config-file-path',
+          str(good_config),
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert len(_saved_result_files(results_dir)) == 1
