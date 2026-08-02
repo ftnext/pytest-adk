@@ -1,0 +1,198 @@
+# Copyright 2026 pytest-adk contributors
+"""Thin async client for the ADK ``api_server`` REST API.
+
+Import constraint: this module must stay importable without google-adk's
+``eval`` extra (no pandas/tabulate). Only import from ``google.adk.events``,
+``google.adk.sessions``, ``google.genai`` and ``httpx`` here -- never from
+``google.adk.evaluation``.
+
+Verified against google-adk 2.5.0
+(``.venv/lib/python3.13/site-packages/google/adk/cli/api_server.py``):
+
+- ``GET /list-apps`` returns a plain ``list[str]`` of app names.
+- ``POST /apps/{app_name}/users/{user_id}/sessions`` creates a session. The
+  request body is ``CreateSessionRequest`` (``session_id``, ``state``,
+  ``events``, all optional); the response body is a ``Session``.
+- ``POST /run`` runs one turn and returns the raw ``list[Event]`` produced by
+  the agent. The request body is ``RunAgentRequest`` (``app_name``,
+  ``user_id``, ``session_id``, ``new_message``, plus optional fields this
+  client does not use).
+- ``DELETE /apps/{app_name}/users/{user_id}/sessions/{session_id}`` deletes a
+  session and returns no body.
+
+Both ``RunAgentRequest`` and ``CreateSessionRequest`` extend
+``google.adk.cli.utils.common.BaseModel``, whose ``model_config`` sets
+``alias_generator=to_camel`` and ``populate_by_name=True``: the server accepts
+(and, for response models such as ``Session``/``Event``, emits) camelCase
+keys. Requests are therefore built directly as camelCase dicts here, so this
+client does not need to import ``google.adk.cli`` (which pulls in FastAPI) --
+it only ever *speaks* the same wire format.
+"""
+
+from __future__ import annotations
+
+from types import TracebackType
+from typing import Any
+
+import httpx
+from google.adk.events import Event
+from google.adk.sessions import Session
+from google.genai import types
+
+
+class AdkApiClient:
+  """Thin async client for the ADK ``api_server`` REST API.
+
+  Wraps :class:`httpx.AsyncClient` and knows only the handful of REST paths
+  and request/response shapes needed to drive a remote ADK agent for
+  evaluation: listing apps, creating/deleting sessions, and running a turn.
+
+  This client performs no retries. ``/run`` is not idempotent, so a failed
+  request is surfaced to the caller via :meth:`httpx.Response.raise_for_status`
+  rather than retried transparently.
+  """
+
+  def __init__(
+      self,
+      base_url: str,
+      *,
+      headers: dict[str, str] | None = None,
+      timeout: float = 300.0,
+      transport: httpx.AsyncBaseTransport | None = None,
+  ) -> None:
+    """Create a client bound to a running ``adk api_server`` instance.
+
+    Args:
+        base_url: Base URL of the api_server, e.g. ``http://localhost:8000``.
+        headers: Extra HTTP headers sent with every request, e.g.
+            ``{'Authorization': 'Bearer ...'}``.
+        timeout: Per-request timeout in seconds. Agent inference can be slow,
+            hence the generous default.
+        transport: Optional ``httpx`` transport, forwarded to
+            ``httpx.AsyncClient``. Tests inject ``httpx.MockTransport`` here
+            to exercise this client without a real network call.
+    """
+    self._client = httpx.AsyncClient(
+        base_url=base_url,
+        headers=headers,
+        timeout=timeout,
+        transport=transport,
+    )
+
+  async def __aenter__(self) -> AdkApiClient:
+    """Return ``self`` so the client can be used as an async context manager."""
+    return self
+
+  async def __aexit__(
+      self,
+      exc_type: type[BaseException] | None,
+      exc: BaseException | None,
+      traceback: TracebackType | None,
+  ) -> None:
+    """Close the underlying HTTP client on context-manager exit."""
+    await self.aclose()
+
+  async def aclose(self) -> None:
+    """Close the underlying HTTP client."""
+    await self._client.aclose()
+
+  async def list_apps(self) -> list[str]:
+    """List the app names the server can run.
+
+    Returns:
+        App names as reported by ``GET /list-apps``.
+
+    Raises:
+        httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+    """
+    response = await self._client.get('/list-apps')
+    response.raise_for_status()
+    return response.json()
+
+  async def create_session(
+      self,
+      *,
+      app_name: str,
+      user_id: str,
+      session_id: str | None = None,
+      state: dict[str, Any] | None = None,
+  ) -> Session:
+    """Create a session, optionally with an explicit ID and/or initial state.
+
+    Args:
+        app_name: Name of the app to create the session under.
+        user_id: User the session belongs to.
+        session_id: Explicit session ID. If omitted, the server generates one.
+        state: Initial session state.
+
+    Returns:
+        The created :class:`~google.adk.sessions.Session`.
+
+    Raises:
+        httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+    """
+    body: dict[str, Any] = {}
+    if session_id is not None:
+      body['sessionId'] = session_id
+    if state is not None:
+      body['state'] = state
+    response = await self._client.post(
+        f'/apps/{app_name}/users/{user_id}/sessions',
+        json=body,
+    )
+    response.raise_for_status()
+    return Session.model_validate(response.json())
+
+  async def run(
+      self,
+      *,
+      app_name: str,
+      user_id: str,
+      session_id: str,
+      new_message: types.Content,
+  ) -> list[Event]:
+    """Run one turn of the agent and return the raw ADK events it produced.
+
+    Args:
+        app_name: Name of the app to run.
+        user_id: User the session belongs to.
+        session_id: Existing session ID to run the turn in.
+        new_message: The user message for this turn.
+
+    Returns:
+        The events the agent produced, parsed with ``Event.model_validate``.
+        ``Event.model_config`` sets ``extra='ignore'``, so fields added by a
+        newer server-side ADK version are dropped rather than raising.
+
+    Raises:
+        httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+    """
+    body = {
+        'appName': app_name,
+        'userId': user_id,
+        'sessionId': session_id,
+        'newMessage': new_message.model_dump(
+            mode='json', by_alias=True, exclude_none=True
+        ),
+    }
+    response = await self._client.post('/run', json=body)
+    response.raise_for_status()
+    return [Event.model_validate(event) for event in response.json()]
+
+  async def delete_session(
+      self, *, app_name: str, user_id: str, session_id: str
+  ) -> None:
+    """Delete a session.
+
+    Args:
+        app_name: Name of the app the session belongs to.
+        user_id: User the session belongs to.
+        session_id: Session ID to delete.
+
+    Raises:
+        httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+    """
+    response = await self._client.delete(
+        f'/apps/{app_name}/users/{user_id}/sessions/{session_id}'
+    )
+    response.raise_for_status()
