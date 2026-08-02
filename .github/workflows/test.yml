@@ -23,14 +23,18 @@ jobs:
         persist-credentials: false
     - name: Install uv
       uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
-      with:
-        python-version: ${{ matrix.python-version }}
+    - name: Install Python ${{ matrix.python-version }}
+      run: uv python install ${{ matrix.python-version }}
     - name: Install Hatch
       uses: pypa/hatch@257e27e51a6a5616ed08a39a408a21c35c9931bc # install
       with:
         version: "1.17.1"
     - name: Point Hatch at the matrix Python
-      run: echo "HATCH_PYTHON=$(uv python find '${{ matrix.python-version }}' --no-project)" >> "$GITHUB_ENV"
+      # Assign first so that a failed lookup ends the step under `bash -e`.
+      # `echo "...=$(...)"` would succeed and export an empty value instead.
+      run: |
+        python_path="$(uv python find '${{ matrix.python-version }}' --no-project)"
+        echo "HATCH_PYTHON=$python_path" >> "$GITHUB_ENV"
     - name: Run tests
       env:
         HATCH_ENV_TYPE_VIRTUAL_UV_PATH: uv
