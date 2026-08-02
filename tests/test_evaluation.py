@@ -436,3 +436,35 @@ async def test_agent_evaluator_toml_rejects_initial_session_file(
         num_runs=1,
         initial_session_file='initial.json',
     )
+
+
+def test_collect_eval_sets_returns_eval_set_and_config_pairs(
+    tmp_path, monkeypatch
+) -> None:
+  test_file = tmp_path / 'single.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+
+  eval_sets = evaluation_module._collect_eval_sets(test_file)
+
+  assert len(eval_sets) == 1
+  eval_set, eval_config = eval_sets[0]
+  assert eval_set.eval_set_id == 'single.test'
+  assert eval_config.user_simulator_config is None
+
+
+def test_collect_eval_sets_directory_recursive(tmp_path, monkeypatch) -> None:
+  seen_test_files = []
+  root_test = tmp_path / 'root.test.json'
+  nested = tmp_path / 'nested'
+  nested.mkdir()
+  nested_test = nested / 'nested.test.json'
+  ignored = nested / 'ignored.json'
+  for path in [root_test, nested_test, ignored]:
+    path.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch, seen_test_files=seen_test_files)
+
+  eval_sets = evaluation_module._collect_eval_sets(tmp_path)
+
+  assert set(seen_test_files) == {str(root_test), str(nested_test)}
+  assert len(eval_sets) == 2

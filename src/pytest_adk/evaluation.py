@@ -56,6 +56,94 @@ def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
   return EvalSet.model_validate(data)
 
 
+def _collect_eval_sets(
+    eval_dataset_file_path_or_dir: str | Path,
+    *,
+    prompt_template_engine: str = 'string',
+    initial_session_file: str | None = None,
+) -> list[tuple[EvalSet, EvalConfig]]:
+  """Load evalset files into ``(EvalSet, EvalConfig)`` pairs.
+
+  This centralizes the evalset discovery and loading logic (directory walk for
+  ``*.test.json``/``*.test.toml``, direct-file loading, TOML vs. JSON
+  branching, and ``<prompt:...>`` template expansion) so it can be shared
+  between the ``AgentEvaluator`` pytest fixture path
+  (:meth:`_AgentEvaluator.evaluate`) and the future ``pytest-adk eval`` CLI,
+  which needs the same loading behavior without going through the fixture.
+
+  Args:
+      eval_dataset_file_path_or_dir: Evalset file, or a directory searched
+          recursively for ``*.test.json`` and ``*.test.toml`` files.
+      prompt_template_engine: Engine used to render ``<prompt:...>`` markers,
+          either ``'string'`` (default, ``string.Template``) or ``'jinja'``.
+      initial_session_file: Optional initial session file for JSON evalsets.
+          TOML evalsets reject this because they support the current
+          ``EvalSet`` schema only.
+
+  Returns:
+      A list of ``(EvalSet, EvalConfig)`` pairs, one per discovered evalset
+      file, in the order the files were found.
+
+  Raises:
+      AssertionError: If ``initial_session_file`` is set and a TOML evalset is
+          encountered.
+  """
+  eval_dataset_path = os.fspath(eval_dataset_file_path_or_dir)
+  test_files: list[str] = []
+  if os.path.isdir(eval_dataset_path):
+    # When a directory is given, only the ADK naming convention
+    # (``.test.json`` / ``.test.toml``) is picked up recursively. This keeps
+    # sibling files such as ``test_config.json`` (eval metrics) and the
+    # ``*.evalset_result.json`` files written by this helper from being
+    # mistakenly loaded as evalsets.
+    for root, _, files in os.walk(eval_dataset_path):
+      for file in files:
+        if file.endswith(('.test.json', '.test.toml')):
+          test_files.append(os.path.join(root, file))
+  else:
+    # A directly specified file is taken at face value; the user's intent is
+    # explicit. Extension routing (and a naming-convention warning) happens
+    # per file below.
+    test_files = [eval_dataset_path]
+
+  initial_session = _AdkAgentEvaluator._get_initial_session(
+      initial_session_file
+  )
+
+  eval_sets: list[tuple[EvalSet, EvalConfig]] = []
+  for test_file in test_files:
+    # Files discovered via a directory always satisfy the convention, so this
+    # only fires for directly specified files that skip the ``.test.`` infix.
+    # The check uses the basename so a ``.test.`` directory name does not mask
+    # a non-conventional file.
+    if '.test.' not in os.path.basename(test_file):
+      logger.warning(
+          'Evalset file %r does not follow the .test.json/.test.toml naming'
+          ' convention; loading it anyway because it was specified directly.',
+          test_file,
+      )
+
+    eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
+    if test_file.endswith('.toml'):
+      assert len(initial_session) == 0, (
+          'Initial session should be specified as a part of the EvalSet file.'
+          ' An explicit initial_session_file is not supported for TOML'
+          ' evalsets, which use the EvalSet schema only.'
+      )
+      eval_set = _load_eval_set_from_toml(test_file)
+    else:
+      eval_set = _AdkAgentEvaluator._load_eval_set_from_file(
+          test_file, eval_config, initial_session
+      )
+
+    eval_set = _expand_prompt_templates(
+        eval_set, Path(test_file).parent, prompt_template_engine
+    )
+    eval_sets.append((eval_set, eval_config))
+
+  return eval_sets
+
+
 class _AgentEvaluator:
   """ADK AgentEvaluator wrapper that persists local eval results.
 
@@ -151,57 +239,13 @@ class _AgentEvaluator:
         AssertionError: If any ADK metric fails, after eval results have been
             saved to disk.
     """
-    eval_dataset_path = os.fspath(eval_dataset_file_path_or_dir)
-    test_files: list[str] = []
-    if os.path.isdir(eval_dataset_path):
-      # When a directory is given, only the ADK naming convention
-      # (``.test.json`` / ``.test.toml``) is picked up recursively. This keeps
-      # sibling files such as ``test_config.json`` (eval metrics) and the
-      # ``*.evalset_result.json`` files written by this helper from being
-      # mistakenly loaded as evalsets.
-      for root, _, files in os.walk(eval_dataset_path):
-        for file in files:
-          if file.endswith(('.test.json', '.test.toml')):
-            test_files.append(os.path.join(root, file))
-    else:
-      # A directly specified file is taken at face value; the user's intent is
-      # explicit. Extension routing (and a naming-convention warning) happens
-      # per file below.
-      test_files = [eval_dataset_path]
-
-    initial_session = _AdkAgentEvaluator._get_initial_session(
-        initial_session_file
+    eval_sets = _collect_eval_sets(
+        eval_dataset_file_path_or_dir,
+        prompt_template_engine=self._prompt_template_engine,
+        initial_session_file=initial_session_file,
     )
 
-    for test_file in test_files:
-      # Files discovered via a directory always satisfy the convention, so this
-      # only fires for directly specified files that skip the ``.test.`` infix.
-      # The check uses the basename so a ``.test.`` directory name does not mask
-      # a non-conventional file.
-      if '.test.' not in os.path.basename(test_file):
-        logger.warning(
-            'Evalset file %r does not follow the .test.json/.test.toml naming'
-            ' convention; loading it anyway because it was specified directly.',
-            test_file,
-        )
-
-      eval_config = _AdkAgentEvaluator.find_config_for_test_file(test_file)
-      if test_file.endswith('.toml'):
-        assert len(initial_session) == 0, (
-            'Initial session should be specified as a part of the EvalSet file.'
-            ' An explicit initial_session_file is not supported for TOML'
-            ' evalsets, which use the EvalSet schema only.'
-        )
-        eval_set = _load_eval_set_from_toml(test_file)
-      else:
-        eval_set = _AdkAgentEvaluator._load_eval_set_from_file(
-            test_file, eval_config, initial_session
-        )
-
-      eval_set = _expand_prompt_templates(
-          eval_set, Path(test_file).parent, self._prompt_template_engine
-      )
-
+    for eval_set, eval_config in eval_sets:
       await self._evaluate_eval_set_and_save(
           agent_module=agent_module,
           eval_set=eval_set,
