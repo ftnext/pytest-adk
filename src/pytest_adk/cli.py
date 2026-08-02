@@ -328,7 +328,7 @@ async def _run_eval(
     # _pinned_session_id comes from the same module (and the same lazy import,
     # for the vertexai-dependency reason in this module's docstring) as the
     # runtime that acts on it, so the guard below and the session-creation
-    # branch in _perform_inference_for_eval_case share one predicate by
+    # branch in _perform_remote_inference_single_eval_item share one predicate by
     # construction and cannot drift apart.
     from .remote.eval_service import _pinned_session_id
     from .remote.eval_service import _resolved_user_id

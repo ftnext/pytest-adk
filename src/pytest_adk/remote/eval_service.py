@@ -362,11 +362,20 @@ class RemoteEvalService(LocalEvalService):
     session_input = eval_case.session_input
     user_id = _resolved_user_id(eval_case, self._default_user_id)
     initial_state = session_input.state if session_input else None
-    requested_session_id = _pinned_session_id(eval_case)
 
-    session_id = requested_session_id
+    session_id: str | None = None
     created_session = False
     try:
+      # Resolved *inside* the failure boundary: _pinned_session_id() validates
+      # this eval case's own session_id and raises on a malformed one. Above
+      # the try, that ValueError would escape perform_inference() entirely and
+      # stop the async generator, so one bad eval case would deny results to
+      # every other (valid) case running alongside it -- per-case isolation is
+      # this method's contract. ``pytest-adk eval`` also rejects the same
+      # input up front, but direct RemoteEvalService callers bypass that.
+      requested_session_id = _pinned_session_id(eval_case)
+      session_id = requested_session_id
+
       if requested_session_id is None:
         session = await self._client.create_session(
             app_name=self._app_name,

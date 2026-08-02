@@ -669,3 +669,58 @@ def test_pinned_session_id_rejects_a_non_string() -> None:
 
 def test_pinned_session_id_is_none_without_session_input() -> None:
   assert _pinned_session_id(EvalCase(eval_id='c', conversation=[])) is None
+
+
+async def test_malformed_session_id_fails_only_its_own_eval_case() -> None:
+  """A bad session_id must not stop the other cases' results.
+
+  Direct RemoteEvalService callers bypass the CLI's preflight rejection, so
+  the malformed value reaches perform_inference(). Resolving it outside the
+  per-case try would let the ValueError escape the async generator and deny
+  results to every valid case running alongside it.
+  """
+  server = FakeApiServer()
+  server.scripts['grace'] = _weather_script()
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+
+  bad_case = _weather_eval_case('bad_case', 'grace')
+  bad_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='grace', session_id=123
+  )
+  if getattr(bad_case.session_input, 'session_id', None) != 123:
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; pinning is not usable here.'
+    )
+
+  eval_set = EvalSet(
+      eval_set_id='mixed_set',
+      eval_cases=[bad_case, _weather_eval_case('ok_case', 'grace')],
+  )
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  # The generator survived and produced a result for *both* cases.
+  assert len(inference_results) == 2
+  results_by_id = {r.eval_case_id: r for r in inference_results}
+
+  assert results_by_id['bad_case'].status == InferenceStatus.FAILURE
+  assert 'non-string' in results_by_id['bad_case'].error_message
+  assert results_by_id['bad_case'].eval_case_id == 'bad_case'
+
+  # The valid case ran to completion, unaffected by its neighbour.
+  ok_result = results_by_id['ok_case']
+  assert ok_result.status == InferenceStatus.SUCCESS
+  assert ok_result.inferences is not None
+  assert len(ok_result.inferences) == 2  # both turns
