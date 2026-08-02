@@ -38,6 +38,7 @@ from google.adk.evaluation.in_memory_eval_sets_manager import InMemoryEvalSetsMa
 from google.adk.evaluation.local_eval_service import LocalEvalService
 from google.genai import types
 
+from pytest_adk.remote.eval_service import _pinned_session_id
 from pytest_adk.remote.eval_service import RemoteEvalService
 
 from .fake_server import FakeApiServer
@@ -619,3 +620,52 @@ async def test_turn_with_no_events_still_becomes_an_invocation() -> None:
   # borrowing the next turn's answer.
   assert second.user_content.parts[0].text == 'what time is it there?'
   assert not (second.final_response and second.final_response.parts)
+
+
+def test_pinned_session_id_accepts_a_string() -> None:
+  eval_case = EvalCase(eval_id='c', conversation=[])
+  eval_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='u', session_id='sess-1'
+  )
+  if getattr(eval_case.session_input, 'session_id', None) != 'sess-1':
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; pinning is not usable here.'
+    )
+
+  assert _pinned_session_id(eval_case) == 'sess-1'
+
+
+def test_pinned_session_id_treats_empty_string_as_unpinned() -> None:
+  """TOML has no null literal, so '' is the documented "not pinned" spelling."""
+  eval_case = EvalCase(eval_id='c', conversation=[])
+  eval_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='u', session_id=''
+  )
+
+  assert _pinned_session_id(eval_case) is None
+
+
+def test_pinned_session_id_rejects_a_non_string() -> None:
+  """A wrong *type* is a mistake, not a spelling of "unpinned".
+
+  Uses ``model_construct`` so the value reaches the predicate regardless of
+  whether the installed google-adk validates extra-field types at load time --
+  this pins pytest-adk's own behavior, which is the part under test.
+  """
+  eval_case = EvalCase(eval_id='typed_case', conversation=[])
+  eval_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='u', session_id=123
+  )
+  if getattr(eval_case.session_input, 'session_id', None) != 123:
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; pinning is not usable here.'
+    )
+
+  with pytest.raises(ValueError, match='non-string'):
+    _pinned_session_id(eval_case)
+
+
+def test_pinned_session_id_is_none_without_session_input() -> None:
+  assert _pinned_session_id(EvalCase(eval_id='c', conversation=[])) is None

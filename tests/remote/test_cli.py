@@ -1574,7 +1574,15 @@ def test_drive_qualified_app_name_is_rejected(tmp_path, capsys) -> None:
 
 
 def test_non_string_session_id_is_rejected(tmp_path, capsys) -> None:
-  """`session_id = 123` is a mistake, not an "unpinned" spelling."""
+  """`session_id = 123` must never be silently downgraded to "unpinned".
+
+  Which layer rejects it is environment-dependent: some google-adk builds
+  validate extra-field types when the evalset is parsed, others let the int
+  through to pytest-adk's own ``_pinned_session_id`` check (unit-tested
+  directly in test_eval_service.py). Either is fine -- what must hold is that
+  the run stops cleanly and never contacts the agent -- so this asserts that
+  contract rather than the wording of one particular rejection.
+  """
   _skip_without_session_id_support()
   (tmp_path / 'test_config.json').write_text(
       _TEST_CONFIG_JSON, encoding='utf-8'
@@ -1606,11 +1614,12 @@ def test_non_string_session_id_is_rejected(tmp_path, capsys) -> None:
 
   assert exit_code == 2
   err = capsys.readouterr().err
-  assert 'non-string' in err
-  assert 'reuse_case' in err
+  # A clean, actionable message either way -- never a traceback...
   assert 'Traceback' not in err
-  # Not silently run against a fresh session.
+  assert 'session_id' in err or 'non-string' in err
+  # ...and never silently run against a fresh session instead.
   assert server.run_requests == []
+  assert not results_dir.exists()
 
 
 def test_empty_string_session_id_still_means_unpinned(tmp_path, capsys) -> None:
