@@ -571,3 +571,167 @@ def test_non_list_json_list_apps_response_exits_two(tmp_path, capsys) -> None:
 
   assert exit_code == 2
   assert 'Failed to resolve --app-name' in capsys.readouterr().err
+
+
+_PROMPT_EVAL_SET_TOML = '''\
+eval_set_id = "prompt_set"
+
+[[eval_cases]]
+eval_id = "prompt_case"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = "<prompt:prompt.txt DEVICE=lamp>" } ]
+
+[eval_cases.conversation.final_response]
+role = "model"
+parts = [ { text = "Done." } ]
+'''
+
+_RESPONSE_ONLY_CONFIG_JSON = json.dumps(
+    {'criteria': {'response_match_score': 0.8}}
+)
+
+
+def _write_prompt_evalset(tmp_path: Path, template_text: str) -> Path:
+  """Writes an evalset whose only user turn is a <prompt:...> marker."""
+  (tmp_path / 'test_config.json').write_text(
+      _RESPONSE_ONLY_CONFIG_JSON, encoding='utf-8'
+  )
+  (tmp_path / 'prompt.txt').write_text(template_text, encoding='utf-8')
+  evalset_path = tmp_path / 'prompt.test.toml'
+  evalset_path.write_text(_PROMPT_EVAL_SET_TOML, encoding='utf-8')
+  return evalset_path
+
+
+def _sent_user_texts(server: FakeApiServer) -> list[str]:
+  """The text of every newMessage the CLI actually sent to the fake server."""
+  return [
+      part['text']
+      for request in server.run_requests
+      for part in request['newMessage']['parts']
+      if 'text' in part
+  ]
+
+
+def test_jinja_prompt_template_engine_renders_before_sending(tmp_path) -> None:
+  """--prompt-template-engine jinja renders {{ VAR }} end-to-end."""
+  evalset_path = _write_prompt_evalset(tmp_path, 'Turn on the {{ DEVICE }}.')
+  server = FakeApiServer()
+  server.scripts['cli_user'] = [[text_event('', 'Done.')]]
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--prompt-template-engine',
+          'jinja',
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  # The remote agent received the rendered prompt, not the marker or literal
+  # Jinja syntax.
+  assert _sent_user_texts(server) == ['Turn on the lamp.']
+  assert len(_saved_result_files(results_dir)) == 1
+
+
+def test_default_engine_leaves_jinja_placeholders_unrendered(tmp_path) -> None:
+  """Contrast case: without the flag, {{ VAR }} is not expanded.
+
+  This is exactly the silent-mismatch the flag exists to avoid -- the marker
+  itself still expands (the prompt file is read), but ``string.Template``
+  leaves ``{{ DEVICE }}`` alone, so the agent sees literal Jinja syntax.
+  """
+  evalset_path = _write_prompt_evalset(tmp_path, 'Turn on the {{ DEVICE }}.')
+  server = FakeApiServer()
+  server.scripts['cli_user'] = [[text_event('', 'Done.')]]
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  assert _sent_user_texts(server) == ['Turn on the {{ DEVICE }}.']
+
+
+def test_string_prompt_template_engine_renders_dollar_placeholders(
+    tmp_path,
+) -> None:
+  """The explicit default keeps string.Template's ${VAR} working."""
+  evalset_path = _write_prompt_evalset(tmp_path, 'Turn on the ${DEVICE}.')
+  server = FakeApiServer()
+  server.scripts['cli_user'] = [[text_event('', 'Done.')]]
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--prompt-template-engine',
+          'string',
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  assert _sent_user_texts(server) == ['Turn on the lamp.']
+
+
+def test_invalid_prompt_template_engine_is_an_argparse_error(
+    tmp_path, capsys
+) -> None:
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main([
+        'eval',
+        _AGENT_URL,
+        str(evalset_path),
+        '--prompt-template-engine',
+        'mustache',
+    ])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+  assert 'mustache' in capsys.readouterr().err

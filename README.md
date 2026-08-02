@@ -292,7 +292,16 @@ same `.test.json` / `.test.toml` discovery convention as the fixture.
 `--app-name` can be omitted when the server's `GET /list-apps` lists exactly
 one app. See `pytest-adk eval --help` for the full flag list (`--user-id`,
 `--config-file-path`, `--timeout`, `--parallelism`, `--results-dir`,
-`--keep-sessions`, `--print-detailed-results`).
+`--prompt-template-engine`, `--keep-sessions`, `--print-detailed-results`).
+
+`<prompt:...>` markers in the evalsets are rendered the same way as on the
+fixture path, but the engine is selected with `--prompt-template-engine`
+(`string`, the default, or `jinja`):
+
+```bash
+pytest-adk eval https://my-agent.example.com tests/evals/ \
+  --prompt-template-engine jinja
+```
 
 Results are saved via ADK's standard `LocalEvalSetResultsManager` layout,
 under `{results-dir}/{app-name}/.adk/eval_history/` (`--results-dir` defaults
@@ -319,6 +328,12 @@ command prints a clear error instead of a traceback.
 
 ### Limitations
 
+- The prompt-template engine is **not** auto-discovered from the
+  `pytest_adk_prompt_template_engine` pytest ini option: the CLI does not load
+  pytest config, so a project set to `jinja` must pass
+  `--prompt-template-engine jinja` explicitly. Otherwise `string.Template`
+  silently leaves `{{ VAR }}` placeholders unrendered and both the deployed
+  agent and the local scorer see literal template syntax.
 - Eval cases using `conversation_scenario` (the user-simulator, dynamic
   multi-turn form) are not supported and fail with a clear per-case message;
   only static `conversation` eval cases can be run remotely.

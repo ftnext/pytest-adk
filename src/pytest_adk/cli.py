@@ -55,6 +55,13 @@ _DEFAULT_NUM_RUNS = 2
 _DEFAULT_TIMEOUT = 300.0
 _DEFAULT_PARALLELISM = 4
 _DEFAULT_RESULTS_DIR = '.'
+# Mirrors prompt_template._VALID_ENGINES / _DEFAULT_ENGINE. Spelled out here so
+# argparse can offer `choices=` (and reject a bad value before any HTTP call);
+# the pytest fixture gets the same choice from the
+# `pytest_adk_prompt_template_engine` ini option instead, which this CLI
+# deliberately does not read -- see the flag's help text.
+_PROMPT_TEMPLATE_ENGINES = ('string', 'jinja')
+_DEFAULT_PROMPT_TEMPLATE_ENGINE = 'string'
 
 # Mirrors the private constant of the same name in evaluation.py: the subpath
 # LocalEvalSetResultsManager writes ``*.evalset_result.json`` files into,
@@ -223,6 +230,21 @@ def _build_parser() -> argparse.ArgumentParser:
       ),
   )
   eval_parser.add_argument(
+      '--prompt-template-engine',
+      choices=_PROMPT_TEMPLATE_ENGINES,
+      default=_DEFAULT_PROMPT_TEMPLATE_ENGINE,
+      help=(
+          'Engine used to render <prompt:...> markers in the given evalsets'
+          f' (default: {_DEFAULT_PROMPT_TEMPLATE_ENGINE!r}, i.e.'
+          " string.Template's ${VAR}; 'jinja' selects Jinja2's {{ VAR }} and"
+          ' needs the `jinja` extra). This is NOT read from the'
+          ' pytest_adk_prompt_template_engine ini option -- the CLI does not'
+          ' load pytest config -- so pass it explicitly to match that option'
+          ' when the same evalsets are also run through the AgentEvaluator'
+          ' fixture.'
+      ),
+  )
+  eval_parser.add_argument(
       '--keep-sessions',
       action='store_true',
       help="Don't delete remote sessions created for this run afterwards.",
@@ -292,7 +314,10 @@ async def _run_eval(
     if app_name is None:
       return EXIT_ERROR
 
-    eval_sets = _load_eval_sets(args.eval_set_paths)
+    eval_sets = _load_eval_sets(
+        args.eval_set_paths,
+        prompt_template_engine=args.prompt_template_engine,
+    )
     if eval_sets is None:
       return EXIT_ERROR
 
@@ -434,12 +459,16 @@ async def _resolve_app_name(
 
 def _load_eval_sets(
     eval_set_paths: Sequence[str],
+    *,
+    prompt_template_engine: str = _DEFAULT_PROMPT_TEMPLATE_ENGINE,
 ) -> list[tuple[EvalSet, EvalConfig]] | None:
   """Loads every evalset from ``eval_set_paths`` via ``_collect_eval_sets``.
 
   Args:
       eval_set_paths: ``EVAL_SET_PATH`` positional arguments, each an evalset
           file or a directory searched recursively.
+      prompt_template_engine: Engine used to render ``<prompt:...>`` markers,
+          from ``--prompt-template-engine``.
 
   Returns:
       The concatenated ``(EvalSet, EvalConfig)`` pairs, in argument order, or
@@ -449,7 +478,11 @@ def _load_eval_sets(
   eval_sets: list[tuple[EvalSet, EvalConfig]] = []
   for eval_set_path in eval_set_paths:
     try:
-      eval_sets.extend(_collect_eval_sets(eval_set_path))
+      eval_sets.extend(
+          _collect_eval_sets(
+              eval_set_path, prompt_template_engine=prompt_template_engine
+          )
+      )
     except Exception as e:  # noqa: BLE001 - surface any load failure to the user
       print(f'Failed to load evalset(s) from {eval_set_path!r}: {e}', file=sys.stderr)
       return None
