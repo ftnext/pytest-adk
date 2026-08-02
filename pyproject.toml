@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "google-adk>=1.30.0",
+    "google-adk>=1.30.0,<3",
     'tomli; python_version < "3.11"',
     "tomli-w",
 ]
@@ -45,6 +45,28 @@ pytest_adk = "pytest_adk.plugin"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.envs.test-adk1]
+installer = "uv"
+features = ["jinja"]
+dependencies = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "google-adk>=1.30.0,<2",
+]
+[tool.hatch.envs.test-adk1.scripts]
+run = "pytest {args}"
+
+[tool.hatch.envs.test-adk2]
+installer = "uv"
+features = ["jinja"]
+dependencies = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "google-adk>=2,<3",
+]
+[tool.hatch.envs.test-adk2.scripts]
+run = "pytest {args}"
 
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]

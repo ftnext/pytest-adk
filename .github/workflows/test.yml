@@ -10,19 +10,28 @@ permissions:
 
 jobs:
   test:
+    name: Python ${{ matrix.python-version }} / google-adk v${{ matrix.adk-major-version }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        adk-major-version: ["1", "2"]
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       with:
         persist-credentials: false
     - name: Install uv
       uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
-    - name: Set up Python ${{ matrix.python-version }}
-      run: uv python install ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: uv sync --extra dev --frozen
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install Hatch
+      uses: pypa/hatch@257e27e51a6a5616ed08a39a408a21c35c9931bc # install
+      with:
+        version: "1.17.1"
+    - name: Point Hatch at the matrix Python
+      run: echo "HATCH_PYTHON=$(uv python find '${{ matrix.python-version }}' --no-project)" >> "$GITHUB_ENV"
     - name: Run tests
-      run: uv run --no-sync python -m pytest
+      env:
+        HATCH_ENV_TYPE_VIRTUAL_UV_PATH: uv
+      run: hatch run test-adk${{ matrix.adk-major-version }}:run

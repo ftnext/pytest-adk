@@ -23,6 +23,21 @@ For development and tests, install the `dev` extra:
 pip install "pytest-adk[dev]"
 ```
 
+Both google-adk v1 (>=1.30.0) and v2 are supported.
+
+## Running the tests
+
+Both google-adk major versions are covered by [Hatch](https://hatch.pypa.io/)
+environments (`test-adk1` and `test-adk2`) declared in `pyproject.toml`. Each
+one installs its dependencies with uv:
+
+```bash
+hatch run test-adk1:run
+hatch run test-adk2:run
+```
+
+Without Hatch installed, `uvx hatch run test-adk1:run` works too.
+
 ## Usage
 
 `AgentEvaluator` is a pytest fixture, auto-registered via the `pytest11` entry
