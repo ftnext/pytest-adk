@@ -308,6 +308,12 @@ async def _run_eval(
 ) -> int:
   """Implements the ``eval`` subcommand. See :func:`main` for the contract."""
   try:
+    # _pinned_session_id comes from the same module (and the same lazy import,
+    # for the vertexai-dependency reason in this module's docstring) as the
+    # runtime that acts on it, so the guard below and the session-creation
+    # branch in _perform_inference_for_eval_case share one predicate by
+    # construction and cannot drift apart.
+    from .remote.eval_service import _pinned_session_id
     from .remote.eval_service import RemoteEvalService
   except ModuleNotFoundError as e:
     print(str(e), file=sys.stderr)
@@ -390,7 +396,12 @@ async def _run_eval(
     # _run_and_evaluate_eval_set), so this is the only layer that can observe
     # the conflict.
     if args.num_runs > 1:
-      reused_session_case_ids = _eval_case_ids_reusing_a_session(eval_sets)
+      reused_session_case_ids = [
+          eval_case.eval_id
+          for eval_set, _ in eval_sets
+          for eval_case in eval_set.eval_cases
+          if _pinned_session_id(eval_case) is not None
+      ]
       if reused_session_case_ids:
         print(
             '--num-runs'
@@ -618,25 +629,6 @@ def _load_eval_sets(
 
     eval_sets.extend(path_eval_sets)
   return eval_sets
-
-
-def _eval_case_ids_reusing_a_session(
-    eval_sets: Sequence[tuple[EvalSet, EvalConfig]],
-) -> list[str]:
-  """Returns the ids of eval cases that pin an existing remote session.
-
-  ``session_id`` is not a declared ``SessionInput`` field: it survives only on
-  google-adk v2, whose model config allows extras (see
-  ``RemoteEvalService._perform_inference_for_eval_case``), hence ``getattr``
-  rather than attribute access.
-  """
-  return [
-      eval_case.eval_id
-      for eval_set, _ in eval_sets
-      for eval_case in eval_set.eval_cases
-      if eval_case.session_input is not None
-      and getattr(eval_case.session_input, 'session_id', None)
-  ]
 
 
 def _find_duplicate_eval_set_id(

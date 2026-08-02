@@ -1125,3 +1125,50 @@ def test_multiple_runs_without_session_reuse_are_unaffected(tmp_path) -> None:
   # A fresh session per run, all cleaned up.
   assert len(server.create_session_requests) == 3
   assert len(server.deleted_session_ids) == 3
+
+
+def test_empty_session_id_is_not_a_pinned_session(tmp_path, capsys) -> None:
+  """`session_id = ""` means "not pinned", consistently in both layers.
+
+  TOML has no null literal, so an empty string is the only way to spell "no
+  pinned session" for a field that would otherwise be omitted. The guard and
+  the runtime share one predicate, so this must neither be rejected by the
+  --num-runs guard nor take the runtime's reuse path (which would run the
+  conversation against a session literally named '' and never clean it up).
+  """
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'reuse.test.toml'
+  evalset_path.write_text(
+      _REUSED_SESSION_EVAL_SET_TOML.replace(
+          'session_id = "pre-existing-session"', 'session_id = ""'
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script() * 2
+  results_dir = tmp_path / 'results'
+
+  # Default --num-runs (2): not rejected by the guard.
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  # A fresh session per run was created and cleaned up...
+  assert len(server.create_session_requests) == 2
+  assert len(server.deleted_session_ids) == 2
+  # ...and the empty id was never used as a session.
+  assert all(req['sessionId'] for req in server.run_requests)
+  assert '' not in server.deleted_session_ids

@@ -65,6 +65,36 @@ _EVAL_SESSION_ID_PREFIX = '___eval___session___'
 _DUMMY_ROOT_AGENT_NAME = 'remote_eval_dummy_agent'
 
 
+def _pinned_session_id(eval_case: EvalCase) -> str | None:
+  """Returns the existing remote session an eval case pins, if any.
+
+  ``session_id`` is not a declared ``SessionInput`` field. It survives only on
+  google-adk v2, whose model config allows extra fields (v1 forbids them and
+  drops it), hence ``getattr`` rather than attribute access.
+
+  An empty string counts as *not* pinned. TOML has no null literal, so
+  ``session_id = ""`` is the only way an evalset author can spell "no pinned
+  session" for a field they would otherwise have to omit entirely; treating it
+  as a pin would mean running the conversation against a session literally
+  named ``''`` and never cleaning it up.
+
+  This is the single source of truth for "does this eval case reuse a
+  session?", shared by the runtime path here and by ``pytest-adk eval``'s
+  ``--num-runs`` guard, so the two cannot drift apart.
+
+  Returns:
+      The pinned session ID, or ``None`` when the eval case should get a
+      freshly created session.
+  """
+  session_input = eval_case.session_input
+  if session_input is None:
+    return None
+  session_id = getattr(session_input, 'session_id', None)
+  if isinstance(session_id, str) and session_id:
+    return session_id
+  return None
+
+
 class RemoteEvalService(LocalEvalService):
   """LocalEvalService with inference delegated to a remote ``api_server``.
 
@@ -286,9 +316,7 @@ class RemoteEvalService(LocalEvalService):
         else self._default_user_id
     )
     initial_state = session_input.state if session_input else None
-    requested_session_id = (
-        getattr(session_input, 'session_id', None) if session_input else None
-    )
+    requested_session_id = _pinned_session_id(eval_case)
 
     session_id = requested_session_id
     created_session = False
