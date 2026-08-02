@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from pytest_adk.cli import main
 
@@ -973,3 +974,154 @@ def test_config_file_path_override_skips_broken_sibling_config(
 
   assert exit_code == 0, capsys.readouterr().err
   assert len(_saved_result_files(results_dir)) == 1
+
+
+_REUSED_SESSION_EVAL_SET_TOML = '''\
+eval_set_id = "reuse_set"
+
+[[eval_cases]]
+eval_id = "reuse_case"
+
+[eval_cases.session_input]
+app_name = "weather_agent"
+user_id = "cli_user"
+session_id = "pre-existing-session"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = "what is the weather in Tokyo?" } ]
+
+[eval_cases.conversation.final_response]
+role = "model"
+parts = [ { text = "It is sunny in Tokyo." } ]
+
+[eval_cases.conversation.intermediate_data]
+tool_uses = [ { name = "get_weather", args = { city = "Tokyo" } } ]
+'''
+
+
+def _skip_without_session_id_support() -> None:
+  """Skips unless this google-adk keeps an extra SessionInput.session_id.
+
+  google-adk v2's SessionInput allows extra fields, so session_id survives
+  loading; v1 forbids them, so such an evalset cannot even be loaded and the
+  reuse feature does not exist there. Mirrors the probe in
+  test_eval_service.py.
+  """
+  from google.adk.evaluation.eval_case import SessionInput
+
+  probe = SessionInput.model_construct(app_name='a', user_id='b', session_id='c')
+  if getattr(probe, 'session_id', None) != 'c':
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; existing-session reuse is not usable here.'
+    )
+
+
+def _write_reused_session_evalset(tmp_path: Path) -> Path:
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'reuse.test.toml'
+  evalset_path.write_text(_REUSED_SESSION_EVAL_SET_TOML, encoding='utf-8')
+  return evalset_path
+
+
+def test_session_reuse_with_default_num_runs_exits_two(tmp_path, capsys) -> None:
+  """Repeat runs would share one mutable remote session, so reject up front.
+
+  --num-runs defaults to 2, so this is the *default* path for anyone using
+  session reuse -- the reason it is an error rather than a warning.
+  """
+  _skip_without_session_id_support()
+  evalset_path = _write_reused_session_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'reuse_case' in err
+  assert '--num-runs 1' in err
+  # Rejected before any inference was attempted.
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_session_reuse_with_single_run_is_allowed(tmp_path, capsys) -> None:
+  """--num-runs 1 has no repetition to contaminate, so reuse still works."""
+  _skip_without_session_id_support()
+  evalset_path = _write_reused_session_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert len(_saved_result_files(results_dir)) == 1
+  # The pre-existing session was used as-is: never created, never deleted.
+  assert server.create_session_requests == []
+  assert server.deleted_session_ids == []
+  assert all(
+      req['sessionId'] == 'pre-existing-session' for req in server.run_requests
+  )
+
+
+def test_multiple_runs_without_session_reuse_are_unaffected(tmp_path) -> None:
+  """The guard must not fire for ordinary evalsets that create sessions."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script() * 3
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '3',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  # A fresh session per run, all cleaned up.
+  assert len(server.create_session_requests) == 3
+  assert len(server.deleted_session_ids) == 3

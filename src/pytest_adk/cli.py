@@ -385,6 +385,27 @@ async def _run_eval(
       )
       return EXIT_ERROR
 
+    # Enforced here rather than in RemoteEvalService because the service never
+    # sees num_runs: the CLI drives the repeat loop itself (see
+    # _run_and_evaluate_eval_set), so this is the only layer that can observe
+    # the conflict.
+    if args.num_runs > 1:
+      reused_session_case_ids = _eval_case_ids_reusing_a_session(eval_sets)
+      if reused_session_case_ids:
+        print(
+            '--num-runs'
+            f' {args.num_runs} cannot be combined with eval cases that reuse'
+            ' an existing remote session via session_input.session_id:'
+            f' {", ".join(repr(i) for i in reused_session_case_ids)}. Every'
+            ' run would send the conversation to that same mutable session,'
+            " so later runs would see earlier runs' turns, state changes and"
+            ' tool side effects instead of being independent repetitions.'
+            ' Pass --num-runs 1, or drop session_input.session_id to let each'
+            ' run get a fresh session.',
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
     duplicate_eval_set_id = _find_duplicate_eval_set_id(eval_sets)
     if duplicate_eval_set_id is not None:
       # Registering two eval sets under one (app_name, eval_set_id) key makes
@@ -597,6 +618,25 @@ def _load_eval_sets(
 
     eval_sets.extend(path_eval_sets)
   return eval_sets
+
+
+def _eval_case_ids_reusing_a_session(
+    eval_sets: Sequence[tuple[EvalSet, EvalConfig]],
+) -> list[str]:
+  """Returns the ids of eval cases that pin an existing remote session.
+
+  ``session_id`` is not a declared ``SessionInput`` field: it survives only on
+  google-adk v2, whose model config allows extras (see
+  ``RemoteEvalService._perform_inference_for_eval_case``), hence ``getattr``
+  rather than attribute access.
+  """
+  return [
+      eval_case.eval_id
+      for eval_set, _ in eval_sets
+      for eval_case in eval_set.eval_cases
+      if eval_case.session_input is not None
+      and getattr(eval_case.session_input, 'session_id', None)
+  ]
 
 
 def _find_duplicate_eval_set_id(

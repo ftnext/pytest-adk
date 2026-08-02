@@ -149,6 +149,18 @@ class RemoteEvalService(LocalEvalService):
     through :meth:`_perform_remote_inference_single_eval_item` instead of an
     in-process ``Runner``.
 
+    Note on repeated calls: an eval case that pins an existing remote session
+    (``session_input.session_id``, google-adk v2 only) is *not* isolated
+    across calls. Every call sends the conversation to that same mutable
+    server-side session, so a second call sees the first call's turns, state
+    changes and tool side effects rather than repeating it independently.
+    Callers that repeat inference to average over runs should either use one
+    call per pinned-session eval case or let each run create a fresh session
+    by leaving ``session_id`` unset. ``pytest-adk eval`` drives that repeat
+    loop itself and rejects ``--num-runs > 1`` for such eval cases; this is a
+    documented property here rather than a runtime check because this method
+    has no visibility into how often the caller intends to invoke it.
+
     Args:
         inference_request: The request for generating inferences.
 

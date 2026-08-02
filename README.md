@@ -352,6 +352,11 @@ command prints a clear error instead of a traceback.
   default `--parallelism` of 4, potentially concurrently.
 - Reusing an existing remote session (instead of creating a fresh one) is
   only possible against google-adk v2 servers, via an extra `session_id`
-  field on an eval case's `session_input`.
+  field on an eval case's `session_input`. Such an eval case cannot be
+  combined with `--num-runs` greater than 1 (the default is 2): every run
+  would send the conversation to that same mutable session, so later runs
+  would see earlier runs' turns, state changes and tool side effects instead
+  of being independent repetitions. The combination is rejected with exit 2 —
+  pass `--num-runs 1`, or drop `session_id` so each run gets a fresh session.
 - Sessions created for the run are deleted afterwards unless you pass
   `--keep-sessions`.
