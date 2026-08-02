@@ -1172,3 +1172,216 @@ def test_empty_session_id_is_not_a_pinned_session(tmp_path, capsys) -> None:
   # ...and the empty id was never used as a session.
   assert all(req['sessionId'] for req in server.run_requests)
   assert '' not in server.deleted_session_ids
+
+
+def _two_case_evalset_toml(
+    *,
+    user_a: str,
+    session_a: str,
+    user_b: str,
+    session_b: str,
+) -> str:
+  """Builds a two-eval-case evalset whose cases pin the given sessions."""
+
+  def case(eval_id: str, user_id: str, session_id: str, invocation_id: str) -> str:
+    return f"""
+[[eval_cases]]
+eval_id = "{eval_id}"
+
+[eval_cases.session_input]
+app_name = "weather_agent"
+user_id = "{user_id}"
+session_id = "{session_id}"
+
+[[eval_cases.conversation]]
+invocation_id = "{invocation_id}"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ {{ text = "what is the weather in Tokyo?" }} ]
+
+[eval_cases.conversation.final_response]
+role = "model"
+parts = [ {{ text = "It is sunny in Tokyo." }} ]
+
+[eval_cases.conversation.intermediate_data]
+tool_uses = [ {{ name = "get_weather", args = {{ city = "Tokyo" }} }} ]
+"""
+
+  return (
+      'eval_set_id = "shared_set"\n'
+      + case('case_a', user_a, session_a, 'inv-1')
+      + case('case_b', user_b, session_b, 'inv-2')
+  )
+
+
+def test_two_cases_sharing_one_pinned_session_exits_two(
+    tmp_path, capsys
+) -> None:
+  """Even with --num-runs 1, two cases on one session contaminate each other."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'shared.test.toml'
+  evalset_path.write_text(
+      _two_case_evalset_toml(
+          user_a='cli_user',
+          session_a='shared-session',
+          user_b='cli_user',
+          session_b='shared-session',
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script() * 2
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'case_a' in err
+  assert 'case_b' in err
+  assert 'shared-session' in err
+  # Rejected before anything was sent to the remote agent.
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_two_cases_pinning_different_sessions_are_allowed(
+    tmp_path, capsys
+) -> None:
+  """Distinct pinned sessions do not share state, so they stay allowed."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'distinct.test.toml'
+  evalset_path.write_text(
+      _two_case_evalset_toml(
+          user_a='cli_user',
+          session_a='session-a',
+          user_b='cli_user',
+          session_b='session-b',
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script() * 2
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  used_sessions = {req['sessionId'] for req in server.run_requests}
+  assert used_sessions == {'session-a', 'session-b'}
+
+
+def test_same_session_id_under_different_users_is_allowed(
+    tmp_path, capsys
+) -> None:
+  """A session id is only *the same* session when the user matches too."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'users.test.toml'
+  evalset_path.write_text(
+      # Same session id, different users -> two different remote sessions.
+      _two_case_evalset_toml(
+          user_a='alice',
+          session_a='shared-session',
+          user_b='bob',
+          session_b='shared-session',
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  # The fake server counts turns per session id, and both cases legitimately
+  # use the id 'shared-session' (under different users), so script two turns
+  # each rather than one.
+  server.scripts['alice'] = _matching_script() * 2
+  server.scripts['bob'] = _matching_script() * 2
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert {req['userId'] for req in server.run_requests} == {'alice', 'bob'}
+
+
+def test_duplicate_eval_id_within_evalset_exits_two(tmp_path, capsys) -> None:
+  """add_eval_case() raises on a repeated eval_id; that must not be exit 1."""
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'dupe.test.toml'
+  # Two cases, same eval_id -- schema-valid, but collides on registration.
+  evalset_path.write_text(
+      _WEATHER_EVAL_SET_TOML + _WEATHER_EVAL_SET_TOML.split('\n', 1)[1],
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'Duplicate eval_id' in err
+  assert 'weather_case' in err
+  assert 'weather_set' in err
+  # A clean message, not a traceback.
+  assert 'Traceback' not in err
+  assert server.run_requests == []

@@ -95,6 +95,23 @@ def _pinned_session_id(eval_case: EvalCase) -> str | None:
   return None
 
 
+def _resolved_user_id(eval_case: EvalCase, default_user_id: str) -> str:
+  """Returns the user an eval case's remote session belongs to.
+
+  An eval case's own ``session_input.user_id`` wins; otherwise the service's
+  default (``pytest-adk eval``'s ``--user-id``) applies.
+
+  Like :func:`_pinned_session_id`, this is shared with the CLI rather than
+  duplicated there: a pinned session is only *the same* session when both the
+  user and the session id match, so the guard has to resolve the user exactly
+  as the runtime does.
+  """
+  session_input = eval_case.session_input
+  if session_input is not None and session_input.user_id:
+    return session_input.user_id
+  return default_user_id
+
+
 class RemoteEvalService(LocalEvalService):
   """LocalEvalService with inference delegated to a remote ``api_server``.
 
@@ -310,11 +327,7 @@ class RemoteEvalService(LocalEvalService):
       return inference_result
 
     session_input = eval_case.session_input
-    user_id = (
-        session_input.user_id
-        if session_input and session_input.user_id
-        else self._default_user_id
-    )
+    user_id = _resolved_user_id(eval_case, self._default_user_id)
     initial_state = session_input.state if session_input else None
     requested_session_id = _pinned_session_id(eval_case)
 

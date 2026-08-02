@@ -314,6 +314,7 @@ async def _run_eval(
     # branch in _perform_inference_for_eval_case share one predicate by
     # construction and cannot drift apart.
     from .remote.eval_service import _pinned_session_id
+    from .remote.eval_service import _resolved_user_id
     from .remote.eval_service import RemoteEvalService
   except ModuleNotFoundError as e:
     print(str(e), file=sys.stderr)
@@ -417,6 +418,32 @@ async def _run_eval(
         )
         return EXIT_ERROR
 
+    # Checked regardless of --num-runs, and across every loaded evalset: one
+    # RemoteEvalService drives them all, so two eval cases resolving to the
+    # same (user_id, session_id) share one mutable remote session whether
+    # perform_inference() runs them concurrently or a later evalset reaches
+    # the session sequentially. Either way each case sees the other's turns,
+    # state changes and tool side effects.
+    shared_session = _eval_cases_sharing_a_pinned_session(
+        eval_sets,
+        default_user_id=args.user_id,
+        pinned_session_id=_pinned_session_id,
+        resolved_user_id=_resolved_user_id,
+    )
+    if shared_session is not None:
+      (user_id, session_id), case_ids = shared_session
+      print(
+          'Eval cases'
+          f' {", ".join(repr(i) for i in case_ids)} all pin the same remote'
+          f' session (user_id {user_id!r}, session_input.session_id'
+          f' {session_id!r}). They would share one mutable session and'
+          " contaminate each other's turns, state changes and tool side"
+          ' effects. Give each eval case its own session_input.session_id,'
+          ' drop it so each gets a fresh session, or run them separately.',
+          file=sys.stderr,
+      )
+      return EXIT_ERROR
+
     duplicate_eval_set_id = _find_duplicate_eval_set_id(eval_sets)
     if duplicate_eval_set_id is not None:
       # Registering two eval sets under one (app_name, eval_set_id) key makes
@@ -431,6 +458,21 @@ async def _run_eval(
           file=sys.stderr,
       )
       return EXIT_ERROR
+
+    for eval_set, _ in eval_sets:
+      duplicate_case_ids = _find_duplicate_eval_case_ids(eval_set)
+      if duplicate_case_ids:
+        # An EvalSet is schema-valid with repeated eval_ids, but
+        # add_eval_case() raises on the second one -- and the registration
+        # loop below is not inside an error handler, so this would otherwise
+        # abort with a traceback and exit 1, the metric-failure code.
+        print(
+            f"Duplicate eval_id(s) in evalset {eval_set.eval_set_id!r}:"
+            f' {", ".join(repr(i) for i in duplicate_case_ids)}. Eval case IDs'
+            ' must be unique within an evalset.',
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
 
     eval_sets_manager = InMemoryEvalSetsManager()
     for eval_set, _ in eval_sets:
@@ -629,6 +671,63 @@ def _load_eval_sets(
 
     eval_sets.extend(path_eval_sets)
   return eval_sets
+
+
+def _eval_cases_sharing_a_pinned_session(
+    eval_sets: Sequence[tuple[EvalSet, EvalConfig]],
+    *,
+    default_user_id: str,
+    pinned_session_id,
+    resolved_user_id,
+) -> tuple[tuple[str, str], list[str]] | None:
+  """Finds eval cases that resolve to one and the same pinned remote session.
+
+  Args:
+      eval_sets: Every loaded ``(EvalSet, EvalConfig)`` pair; one service runs
+          them all, so the search spans evalsets rather than staying within
+          one.
+      default_user_id: ``--user-id``, applied when an eval case does not name
+          its own.
+      pinned_session_id: ``eval_service._pinned_session_id``, injected so this
+          module does not import the (lazily imported) service at module
+          scope.
+      resolved_user_id: ``eval_service._resolved_user_id``, injected likewise.
+
+  Returns:
+      ``((user_id, session_id), [eval_case_id, ...])`` for the first session
+      claimed by more than one eval case, or ``None`` when every pin is
+      unique. Eval cases pinning *different* sessions are fine.
+  """
+  by_session: dict[tuple[str, str], list[str]] = {}
+  for eval_set, _ in eval_sets:
+    for eval_case in eval_set.eval_cases:
+      session_id = pinned_session_id(eval_case)
+      if session_id is None:
+        continue
+      key = (resolved_user_id(eval_case, default_user_id), session_id)
+      by_session.setdefault(key, []).append(eval_case.eval_id)
+
+  for key, case_ids in by_session.items():
+    if len(case_ids) > 1:
+      return key, case_ids
+  return None
+
+
+def _find_duplicate_eval_case_ids(eval_set: EvalSet) -> list[str]:
+  """Returns ``eval_id``s appearing more than once in one evalset.
+
+  ``InMemoryEvalSetsManager.add_eval_case`` keys cases by
+  ``(app_name, eval_set_id, eval_id)`` and raises ``ValueError`` on a repeat,
+  so duplicates only collide within a single evalset -- and duplicate
+  ``eval_set_id``s are already rejected separately.
+  """
+  seen: set[str] = set()
+  duplicates: list[str] = []
+  for eval_case in eval_set.eval_cases:
+    if eval_case.eval_id in seen and eval_case.eval_id not in duplicates:
+      duplicates.append(eval_case.eval_id)
+    seen.add(eval_case.eval_id)
+  return duplicates
 
 
 def _find_duplicate_eval_set_id(
