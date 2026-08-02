@@ -300,7 +300,9 @@ to the current directory). The save path is always printed after the run.
 
 The command exits `0` if every eval metric passed, `1` if at least one metric
 failed, and `2` on an execution error (bad `AGENT_URL`, a connection failure,
-`--app-name` resolution failure, or any eval case whose inference failed).
+`--app-name` resolution failure, an evalset or `--config-file-path` that cannot
+be loaded, `EVAL_SET_PATH`s that discover no evalset at all, two evalsets
+sharing one `eval_set_id`, or any eval case whose inference failed).
 
 Scoring always runs locally: LLM-as-judge metrics use your own API key and
 billing, and only inference is delegated to the remote server.

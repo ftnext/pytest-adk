@@ -104,10 +104,22 @@ class AdkApiClient:
 
     Raises:
         httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+        ValueError: If the response body is not JSON, or is not a JSON list of
+            strings. A URL that points at something other than an api_server
+            (or a redirect to an HTML login page) typically lands here rather
+            than on a 4xx/5xx status.
     """
     response = await self._client.get('/list-apps')
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    if not isinstance(payload, list) or not all(
+        isinstance(app, str) for app in payload
+    ):
+      raise ValueError(
+          'GET /list-apps did not return a JSON list of app names, got'
+          f' {payload!r}.'
+      )
+    return payload
 
   async def create_session(
       self,

@@ -69,11 +69,21 @@ EXIT_ERROR = 2
 
 
 def _agent_url(value: str) -> str:
-  """argparse ``type=`` for ``AGENT_URL``: must start with http(s)://."""
+  """argparse ``type=`` for ``AGENT_URL``: a parseable http(s):// URL.
+
+  The scheme prefix alone is not enough: values such as ``'http://['`` pass a
+  prefix check but make ``httpx`` raise ``InvalidURL`` later, when the client
+  is constructed. Parsing here turns those into an argparse error (which also
+  exits with :data:`EXIT_ERROR`) instead of a traceback.
+  """
   if not value.startswith(('http://', 'https://')):
     raise argparse.ArgumentTypeError(
         f"AGENT_URL must start with 'http://' or 'https://', got {value!r}."
     )
+  try:
+    httpx.URL(value)
+  except httpx.InvalidURL as e:
+    raise argparse.ArgumentTypeError(f'AGENT_URL is not a valid URL ({e}): {value!r}.')
   return value
 
 
@@ -244,8 +254,8 @@ def main(
       Process exit code: ``0`` if every eval metric passed, ``1`` if at least
       one metric failed, ``2`` on an execution error (bad ``AGENT_URL``,
       connection failure, ``--app-name`` resolution failure, evalset load
-      failure, or any eval case whose inference failed) or when no
-      subcommand is given.
+      failure, no evalset discovered at all, duplicate ``eval_set_id``s, or
+      any eval case whose inference failed) or when no subcommand is given.
   """
   parser = _build_parser()
   args = parser.parse_args(argv)
@@ -287,10 +297,35 @@ async def _run_eval(
       return EXIT_ERROR
 
     if args.config_file_path:
-      override_config = get_evaluation_criteria_or_default(
-          args.config_file_path
-      )
+      try:
+        override_config = get_evaluation_criteria_or_default(
+            args.config_file_path
+        )
+      except Exception as e:  # noqa: BLE001 - surface any load failure to the user
+        # A missing file, malformed JSON, or an unknown metric name in the
+        # override config is a user-input error like an unloadable evalset,
+        # and should exit EXIT_ERROR with a message rather than traceback.
+        print(
+            f'Failed to load --config-file-path {args.config_file_path!r}: {e}',
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
       eval_sets = [(eval_set, override_config) for eval_set, _ in eval_sets]
+
+    duplicate_eval_set_id = _find_duplicate_eval_set_id(eval_sets)
+    if duplicate_eval_set_id is not None:
+      # Registering two eval sets under one (app_name, eval_set_id) key makes
+      # InMemoryEvalSetsManager.create_eval_set raise, and even if it did not,
+      # inference requests identify an eval set by that id alone -- so the
+      # second set would shadow the first and be scored with the wrong cases
+      # and config. Reject it with an actionable message instead.
+      print(
+          f"Duplicate eval_set_id {duplicate_eval_set_id!r} across the given"
+          ' EVAL_SET_PATHs. Eval set IDs must be unique within one run; give'
+          ' each evalset file a distinct eval_set_id (or run them separately).',
+          file=sys.stderr,
+      )
+      return EXIT_ERROR
 
     eval_sets_manager = InMemoryEvalSetsManager()
     for eval_set, _ in eval_sets:
@@ -369,7 +404,11 @@ async def _resolve_app_name(
 
   try:
     apps = await client.list_apps()
-  except httpx.HTTPError as e:
+  except (httpx.HTTPError, ValueError) as e:
+    # ValueError covers a body that is not JSON at all (json.JSONDecodeError)
+    # and one whose shape is not a list of app names (raised by list_apps) --
+    # e.g. AGENT_URL pointing at a non-api_server, or a redirect to an HTML
+    # page. Both are --app-name resolution failures, not tracebacks.
     print(f'Failed to resolve --app-name via GET /list-apps: {e}', file=sys.stderr)
     return None
 
@@ -414,7 +453,32 @@ def _load_eval_sets(
     except Exception as e:  # noqa: BLE001 - surface any load failure to the user
       print(f'Failed to load evalset(s) from {eval_set_path!r}: {e}', file=sys.stderr)
       return None
+
+  if not eval_sets:
+    # Every given path existed but nothing matched the naming convention (a
+    # directory with no *.test.json / *.test.toml files, e.g. because they are
+    # misnamed). Returning an empty list here would run no inference at all and
+    # still exit EXIT_SUCCESS, falsely reporting that every metric passed.
+    print(
+        'No evalsets found in'
+        f' {", ".join(repr(path) for path in eval_set_paths)}. Directories are'
+        ' searched recursively for files named *.test.json / *.test.toml.',
+        file=sys.stderr,
+    )
+    return None
   return eval_sets
+
+
+def _find_duplicate_eval_set_id(
+    eval_sets: Sequence[tuple[EvalSet, EvalConfig]],
+) -> str | None:
+  """Returns the first ``eval_set_id`` that occurs more than once, else ``None``."""
+  seen: set[str] = set()
+  for eval_set, _ in eval_sets:
+    if eval_set.eval_set_id in seen:
+      return eval_set.eval_set_id
+    seen.add(eval_set.eval_set_id)
+  return None
 
 
 async def _run_and_evaluate_eval_set(

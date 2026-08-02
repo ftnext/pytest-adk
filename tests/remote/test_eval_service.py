@@ -570,3 +570,52 @@ async def test_http_error_for_one_case_does_not_stop_others() -> None:
   eval_results_by_id = {r.eval_id: r for r in eval_case_results}
   assert eval_results_by_id['failing_case'].final_eval_status == EvalStatus.FAILED
   assert eval_results_by_id['ok_case'].final_eval_status == EvalStatus.PASSED
+
+
+async def test_turn_with_no_events_still_becomes_an_invocation() -> None:
+  """A silent /run response must not drop the turn and shift later ones.
+
+  The fake server returns ``[]`` for any turn beyond its script, so scripting
+  only the first of the eval case's two turns makes the second turn silent.
+  Without synthesizing the user event unconditionally, that turn would produce
+  no Invocation at all: ``inferences`` would hold a single invocation and
+  scoring would line the second turn's expectation up against the first turn's
+  response.
+  """
+  server = FakeApiServer()
+  server.scripts['alice'] = _weather_script()[:1]  # 2nd turn answers with []
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+  eval_set = EvalSet(
+      eval_set_id='weather_set',
+      eval_cases=[_weather_eval_case('weather_case', 'alice')],
+  )
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  assert len(inference_results) == 1
+  inference_result = inference_results[0]
+  # A silent turn is not itself a transport failure: inference succeeded.
+  assert inference_result.status == InferenceStatus.SUCCESS
+  assert inference_result.inferences is not None
+  # Both turns are represented, in order -- the silent one included.
+  assert len(inference_result.inferences) == 2
+
+  first, second = inference_result.inferences
+  assert first.user_content.parts[0].text == 'what is the weather in Tokyo?'
+  assert first.final_response is not None
+  # The unanswered prompt keeps its user_content and has no response, so the
+  # metrics score it (and fail it) on its own terms rather than silently
+  # borrowing the next turn's answer.
+  assert second.user_content.parts[0].text == 'what time is it there?'
+  assert not (second.final_response and second.final_response.parts)

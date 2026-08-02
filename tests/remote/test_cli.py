@@ -405,3 +405,169 @@ def test_no_subcommand_prints_help_and_exits_two(capsys) -> None:
 
   assert exit_code == 2
   assert 'usage' in capsys.readouterr().out.lower()
+
+
+def test_unparseable_agent_url_is_an_argparse_error(tmp_path, capsys) -> None:
+  """A well-prefixed but unparseable URL must not reach httpx as a traceback.
+
+  ``http://[::1`` (an unterminated IPv6 literal) makes ``httpx`` raise
+  ``InvalidURL``; before it was validated at parse time, that escaped from
+  ``AdkApiClient``'s construction -- which happens outside ``_run_eval``'s
+  ``try`` -- as a traceback rather than the documented exit code.
+  """
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main(['eval', 'http://[::1', str(evalset_path)])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+  assert 'not a valid URL' in capsys.readouterr().err
+
+
+def test_directory_without_evalsets_exits_two(tmp_path, capsys) -> None:
+  """An existing directory holding no *.test.* files must not exit 0."""
+  evalset_dir = tmp_path / 'evals'
+  evalset_dir.mkdir()
+  # Misnamed: lacks the `.test.` infix, so directory discovery skips it.
+  (evalset_dir / 'weather.toml').write_text(
+      _WEATHER_EVAL_SET_TOML, encoding='utf-8'
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_dir),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'No evalsets found' in err
+  assert not results_dir.exists()
+  # Nothing was ever sent to the remote server.
+  assert server.run_requests == []
+
+
+def test_duplicate_eval_set_id_exits_two(tmp_path, capsys) -> None:
+  """Two files sharing an eval_set_id collide in InMemoryEvalSetsManager."""
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  first = tmp_path / 'one.test.toml'
+  first.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+  second = tmp_path / 'two.test.toml'
+  # Same eval_set_id ("weather_set"), different eval case id.
+  second.write_text(
+      _WEATHER_EVAL_SET_TOML.replace('weather_case', 'weather_case_2'),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(first),
+          str(second),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'weather_set' in err
+  assert 'Duplicate eval_set_id' in err
+  assert not results_dir.exists()
+
+
+def test_malformed_config_file_path_exits_two(tmp_path, capsys) -> None:
+  evalset_path = _write_evalset(tmp_path)
+  bad_config = tmp_path / 'broken_config.json'
+  bad_config.write_text('{not valid json', encoding='utf-8')
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--config-file-path',
+          str(bad_config),
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  assert 'broken_config.json' in capsys.readouterr().err
+  assert not results_dir.exists()
+
+
+def test_non_json_list_apps_response_exits_two(tmp_path, capsys) -> None:
+  """A URL pointing at a non-api_server must not raise a JSON decode error."""
+  evalset_path = _write_evalset(tmp_path)
+  results_dir = tmp_path / 'results'
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200, html='<html><body>Please sign in</body></html>'
+    )
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=httpx.MockTransport(handler),
+  )
+
+  assert exit_code == 2
+  assert 'Failed to resolve --app-name' in capsys.readouterr().err
+  assert not results_dir.exists()
+
+
+def test_non_list_json_list_apps_response_exits_two(tmp_path, capsys) -> None:
+  """Valid JSON of the wrong shape is an app-name resolution failure too."""
+  evalset_path = _write_evalset(tmp_path)
+  results_dir = tmp_path / 'results'
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={'apps': ['weather_agent']})
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=httpx.MockTransport(handler),
+  )
+
+  assert exit_code == 2
+  assert 'Failed to resolve --app-name' in capsys.readouterr().err

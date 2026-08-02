@@ -303,21 +303,33 @@ class RemoteEvalService(LocalEvalService):
             session_id=session_id,
             new_message=invocation.user_content,
         )
-        if turn_events:
-          # The api_server's /run only returns agent-produced events, not a
-          # "user" event for the message that was just sent -- but
-          # EvaluationGenerator.convert_events_to_eval_invocations() derives
-          # each Invocation's user_content from an author="user" event. This
-          # synthesizes that event (reusing the turn's invocation_id, which
-          # every response event for one /run call shares) so the resulting
-          # Invocation carries the user_content we actually sent.
-          all_events.append(
-              Event(
-                  invocation_id=turn_events[0].invocation_id,
-                  author='user',
-                  content=invocation.user_content,
-              )
-          )
+        # The api_server's /run only returns agent-produced events, not a
+        # "user" event for the message that was just sent -- but
+        # EvaluationGenerator.convert_events_to_eval_invocations() derives
+        # each Invocation's user_content from an author="user" event. This
+        # synthesizes that event (reusing the turn's invocation_id, which
+        # every response event for one /run call shares) so the resulting
+        # Invocation carries the user_content we actually sent.
+        #
+        # This happens even when the server returned no events at all: that
+        # turn still has to become an Invocation, otherwise it silently
+        # vanishes and every later turn shifts up by one, so scoring would
+        # compare each expectation against the wrong turn's response. With the
+        # synthesized user event alone, the turn converts to an Invocation
+        # carrying user_content and no final_response -- an unanswered prompt,
+        # which the metrics can score (and fail) on its own terms. A fresh
+        # invocation_id is used because there is no event to take one from.
+        all_events.append(
+            Event(
+                invocation_id=(
+                    turn_events[0].invocation_id
+                    if turn_events
+                    else str(uuid.uuid4())
+                ),
+                author='user',
+                content=invocation.user_content,
+            )
+        )
         all_events.extend(turn_events)
 
       inference_result.inferences = (
