@@ -158,7 +158,18 @@ class RemoteEvalService(LocalEvalService):
     Raises:
         NotFoundError: If ``inference_request.eval_set_id`` is not found for
             ``inference_request.app_name`` in ``eval_sets_manager``.
+        ValueError: If ``inference_request.inference_config.parallelism`` is
+            not >= 1 -- ``asyncio.Semaphore`` accepts 0 or negative values
+            without error, but then never lets any task acquire it, which
+            would otherwise deadlock this method forever instead of failing
+            fast.
     """
+    if inference_request.inference_config.parallelism < 1:
+      raise ValueError(
+          'inference_request.inference_config.parallelism must be >= 1,'
+          f' got {inference_request.inference_config.parallelism!r}.'
+      )
+
     eval_set = self._eval_sets_manager.get_eval_set(
         app_name=inference_request.app_name,
         eval_set_id=inference_request.eval_set_id,

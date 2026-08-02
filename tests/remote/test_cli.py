@@ -334,6 +334,45 @@ def test_invalid_agent_url_is_an_argparse_error(tmp_path) -> None:
   assert raised
 
 
+def test_zero_parallelism_is_an_argparse_error_and_does_not_hang(tmp_path) -> None:
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main(['eval', _AGENT_URL, str(evalset_path), '--parallelism', '0'])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+
+
+def test_negative_parallelism_is_an_argparse_error(tmp_path) -> None:
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main(['eval', _AGENT_URL, str(evalset_path), '--parallelism', '-1'])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+
+
+def test_zero_num_runs_is_an_argparse_error(tmp_path) -> None:
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main(['eval', _AGENT_URL, str(evalset_path), '--num-runs', '0'])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+
+
 def test_keep_sessions_leaves_remote_sessions_undeleted(tmp_path) -> None:
   evalset_path = _write_evalset(tmp_path)
   server = FakeApiServer()

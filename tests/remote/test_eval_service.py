@@ -277,6 +277,52 @@ _METRICS = [
 ]
 
 
+async def test_perform_inference_rejects_non_positive_parallelism() -> None:
+  """A non-positive ``parallelism`` must raise, not deadlock.
+
+  ``asyncio.Semaphore(value=0)`` (or a negative value) never lets any task
+  acquire it, so without this guard ``perform_inference()`` would hang
+  forever instead of failing fast. See ``src/pytest_adk/cli.py``'s
+  ``_positive_int`` for the argparse-level guard on the CLI's own
+  ``--parallelism``/``--num-runs`` flags; this is the defense-in-depth
+  counterpart for library users constructing ``InferenceConfig`` directly.
+  """
+  server = FakeApiServer()
+  server.scripts['alice'] = _weather_script()
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+  eval_set = EvalSet(
+      eval_set_id='weather_set',
+      eval_cases=[_weather_eval_case('weather_case', 'alice')],
+  )
+  eval_sets_manager.create_eval_set(
+      app_name=_LOCAL_APP_NAME, eval_set_id=eval_set.eval_set_id
+  )
+  for eval_case in eval_set.eval_cases:
+    eval_sets_manager.add_eval_case(
+        app_name=_LOCAL_APP_NAME,
+        eval_set_id=eval_set.eval_set_id,
+        eval_case=eval_case,
+    )
+  inference_request = InferenceRequest(
+      app_name=_LOCAL_APP_NAME,
+      eval_set_id=eval_set.eval_set_id,
+      inference_config=InferenceConfig(parallelism=0),
+  )
+
+  try:
+    with pytest.raises(ValueError, match='parallelism'):
+      async for _ in service.perform_inference(inference_request):
+        pass
+  finally:
+    await client.aclose()
+
+
 # ---------------------------------------------------------------------------
 # End-to-end tests
 # ---------------------------------------------------------------------------

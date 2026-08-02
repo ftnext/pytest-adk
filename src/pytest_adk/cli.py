@@ -77,6 +77,17 @@ def _agent_url(value: str) -> str:
   return value
 
 
+def _positive_int(value: str) -> int:
+  """argparse ``type=`` for an integer flag that must be >= 1."""
+  try:
+    parsed = int(value)
+  except ValueError:
+    raise argparse.ArgumentTypeError(f'must be an integer, got {value!r}.')
+  if parsed < 1:
+    raise argparse.ArgumentTypeError(f'must be >= 1, got {value!r}.')
+  return parsed
+
+
 def _header(value: str) -> tuple[str, str]:
   """argparse ``type=`` for a repeatable ``--header 'Name: Value'`` flag."""
   if ':' not in value:
@@ -158,9 +169,12 @@ def _build_parser() -> argparse.ArgumentParser:
   )
   eval_parser.add_argument(
       '--num-runs',
-      type=int,
+      type=_positive_int,
       default=_DEFAULT_NUM_RUNS,
-      help=f'Number of runs per eval case (default: {_DEFAULT_NUM_RUNS}).',
+      help=(
+          f'Number of runs per eval case (default: {_DEFAULT_NUM_RUNS};'
+          ' must be >= 1).'
+      ),
   )
   eval_parser.add_argument(
       '--header',
@@ -182,9 +196,12 @@ def _build_parser() -> argparse.ArgumentParser:
   )
   eval_parser.add_argument(
       '--parallelism',
-      type=int,
+      type=_positive_int,
       default=_DEFAULT_PARALLELISM,
-      help=f'Inference/evaluation parallelism (default: {_DEFAULT_PARALLELISM}).',
+      help=(
+          'Inference/evaluation parallelism (default:'
+          f' {_DEFAULT_PARALLELISM}; must be >= 1).'
+      ),
   )
   eval_parser.add_argument(
       '--results-dir',
