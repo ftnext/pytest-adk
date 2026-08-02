@@ -348,9 +348,9 @@ async def _run_eval(
     # runtime that acts on it, so the guard below and the session-creation
     # branch in _perform_remote_inference_single_eval_item share one predicate by
     # construction and cannot drift apart.
+    from .remote.eval_service import _group_eval_cases_by_pinned_session
     from .remote.eval_service import _pinned_session_id
     from .remote.eval_service import _pinned_session_state_error
-    from .remote.eval_service import _resolved_user_id
     from .remote.eval_service import RemoteEvalService
   except ModuleNotFoundError as e:
     print(str(e), file=sys.stderr)
@@ -485,8 +485,7 @@ async def _run_eval(
     shared_session = _eval_cases_sharing_a_pinned_session(
         eval_sets,
         default_user_id=args.user_id,
-        pinned_session_id=_pinned_session_id,
-        resolved_user_id=_resolved_user_id,
+        group_by_pinned_session=_group_eval_cases_by_pinned_session,
     )
     if shared_session is not None:
       (user_id, session_id), case_ids = shared_session
@@ -516,6 +515,23 @@ async def _run_eval(
           file=sys.stderr,
       )
       return EXIT_ERROR
+
+    for eval_set, eval_config in eval_sets:
+      if not get_eval_metrics_from_config(eval_config):
+        # A schema-valid config whose `criteria` is empty. Left alone, the run
+        # would perform real inference (with real remote tool side effects),
+        # then score against no metrics at all -- which cannot fail -- save a
+        # result file and exit 0, reporting success for something that was
+        # never checked. Note this cannot fire for an evalset with no config
+        # file: ADK's default criteria are non-empty.
+        print(
+            f"No eval metrics configured for evalset {eval_set.eval_set_id!r}:"
+            ' its evaluation criteria are empty, so nothing would be scored'
+            ' and the result could not mean anything. Add criteria to the'
+            ' evalset\'s test_config.json, or pass --config-file-path.',
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
 
     for eval_set, _ in eval_sets:
       duplicate_case_ids = _find_duplicate_eval_case_ids(eval_set)
@@ -756,10 +772,13 @@ def _eval_cases_sharing_a_pinned_session(
     eval_sets: Sequence[tuple[EvalSet, EvalConfig]],
     *,
     default_user_id: str,
-    pinned_session_id,
-    resolved_user_id,
+    group_by_pinned_session,
 ) -> tuple[tuple[str, str], list[str]] | None:
   """Finds eval cases that resolve to one and the same pinned remote session.
+
+  The grouping itself lives in ``eval_service`` and is shared with
+  ``RemoteEvalService``, which fails the conflicting cases for direct library
+  callers; this only decides how the CLI reports the same finding.
 
   Args:
       eval_sets: Every loaded ``(EvalSet, EvalConfig)`` pair; one service runs
@@ -767,25 +786,20 @@ def _eval_cases_sharing_a_pinned_session(
           one.
       default_user_id: ``--user-id``, applied when an eval case does not name
           its own.
-      pinned_session_id: ``eval_service._pinned_session_id``, injected so this
-          module does not import the (lazily imported) service at module
+      group_by_pinned_session:
+          ``eval_service._group_eval_cases_by_pinned_session``, injected so
+          this module does not import the (lazily imported) service at module
           scope.
-      resolved_user_id: ``eval_service._resolved_user_id``, injected likewise.
 
   Returns:
       ``((user_id, session_id), [eval_case_id, ...])`` for the first session
       claimed by more than one eval case, or ``None`` when every pin is
       unique. Eval cases pinning *different* sessions are fine.
   """
-  by_session: dict[tuple[str, str], list[str]] = {}
-  for eval_set, _ in eval_sets:
-    for eval_case in eval_set.eval_cases:
-      session_id = pinned_session_id(eval_case)
-      if session_id is None:
-        continue
-      key = (resolved_user_id(eval_case, default_user_id), session_id)
-      by_session.setdefault(key, []).append(eval_case.eval_id)
-
+  all_eval_cases = [
+      eval_case for eval_set, _ in eval_sets for eval_case in eval_set.eval_cases
+  ]
+  by_session = group_by_pinned_session(all_eval_cases, default_user_id)
   for key, case_ids in by_session.items():
     if len(case_ids) > 1:
       return key, case_ids

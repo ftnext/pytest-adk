@@ -21,6 +21,7 @@ import asyncio
 import logging
 import uuid
 from typing import AsyncGenerator
+from typing import Sequence
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.errors.not_found_error import NotFoundError
@@ -111,6 +112,69 @@ def _pinned_session_id(eval_case: EvalCase) -> str | None:
   # An empty string is the documented "not pinned" spelling (see above), not
   # an error: unlike a wrong type, it is the only way TOML can express it.
   return session_id or None
+
+
+def _group_eval_cases_by_pinned_session(
+    eval_cases: Sequence[EvalCase], default_user_id: str
+) -> dict[tuple[str, str], list[str]]:
+  """Groups eval case ids by the remote session they pin.
+
+  Two eval cases address the same remote session only when *both* the
+  resolved user and the session id match, so the key is that pair. Cases that
+  pin nothing are not grouped.
+
+  A case whose ``session_id`` has a bad type is skipped rather than raised on:
+  it already fails on its own inside the per-case boundary, and raising here
+  would abort the whole grouping (and, from ``perform_inference``, every other
+  case's result).
+
+  This is the single source of truth for "which eval cases share a session",
+  used by the service to fail the conflicting cases and by ``pytest-adk
+  eval``'s preflight to reject the run outright, so the two cannot disagree
+  about what counts as sharing.
+
+  Returns:
+      ``{(user_id, session_id): [eval_case_id, ...]}``; a list longer than one
+      entry is a conflict.
+  """
+  by_session: dict[tuple[str, str], list[str]] = {}
+  for eval_case in eval_cases:
+    try:
+      session_id = _pinned_session_id(eval_case)
+    except ValueError:
+      continue
+    if session_id is None:
+      continue
+    key = (_resolved_user_id(eval_case, default_user_id), session_id)
+    by_session.setdefault(key, []).append(eval_case.eval_id)
+  return by_session
+
+
+def _shared_pinned_session_errors(
+    eval_cases: Sequence[EvalCase], default_user_id: str
+) -> dict[str, str]:
+  """Maps each eval case that shares a pinned session to its error message.
+
+  Returns:
+      ``{eval_case_id: message}``, empty when every pin is unique.
+  """
+  errors: dict[str, str] = {}
+  groups = _group_eval_cases_by_pinned_session(eval_cases, default_user_id)
+  for (user_id, session_id), case_ids in groups.items():
+    if len(case_ids) < 2:
+      continue
+    for eval_case_id in case_ids:
+      others = [i for i in case_ids if i != eval_case_id]
+      errors[eval_case_id] = (
+          f"Eval case '{eval_case_id}' pins the same remote session (user_id"
+          f' {user_id!r}, session_input.session_id {session_id!r}) as'
+          f' {", ".join(repr(i) for i in others)}. They would share one'
+          " mutable session and contaminate each other's turns, state changes"
+          ' and tool side effects, so none of them is run. Give each eval case'
+          ' its own session_input.session_id, or drop it so each gets a fresh'
+          ' session.'
+      )
+  return errors
 
 
 def _pinned_session_state_error(
@@ -312,7 +376,27 @@ class RemoteEvalService(LocalEvalService):
         value=inference_request.inference_config.parallelism
     )
 
+    # Cross-case, so it cannot be decided inside a single eval case's run:
+    # two cases pinning one session contaminate each other whether they run
+    # concurrently or in sequence. Computed before scheduling, and reported as
+    # a FAILURE for the conflicting cases *only* -- raising here would stop
+    # the generator and deny results to every unrelated case, which is the
+    # opposite of this method's per-case isolation contract.
+    shared_session_errors = _shared_pinned_session_errors(
+        eval_cases, self._default_user_id
+    )
+
     async def run_inference(eval_case: EvalCase) -> InferenceResult:
+      error_message = shared_session_errors.get(eval_case.eval_id)
+      if error_message is not None:
+        return InferenceResult(
+            app_name=inference_request.app_name,
+            eval_set_id=inference_request.eval_set_id,
+            eval_case_id=eval_case.eval_id,
+            session_id=None,
+            status=InferenceStatus.FAILURE,
+            error_message=error_message,
+        )
       async with semaphore:
         return await self._perform_remote_inference_single_eval_item(
             app_name=inference_request.app_name,

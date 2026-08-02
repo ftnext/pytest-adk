@@ -1761,3 +1761,73 @@ def test_user_id_with_slash_is_an_argparse_error(tmp_path, capsys) -> None:
 
   assert raised
   assert '--user-id' in capsys.readouterr().err
+
+
+def test_evalset_with_empty_criteria_exits_two(tmp_path, capsys) -> None:
+  """Scoring against no metrics cannot fail, so it must not report success."""
+  (tmp_path / 'test_config.json').write_text(
+      json.dumps({'criteria': {}}), encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'weather.test.toml'
+  evalset_path.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'No eval metrics configured' in err
+  assert 'weather_set' in err
+  # Rejected before any inference, so no remote tool side effects were caused.
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_evalset_without_a_config_file_still_runs(tmp_path, capsys) -> None:
+  """ADK's default criteria are non-empty, so a missing config is not empty.
+
+  Guards the inverse mistake: the empty-criteria check must not reject
+  evalsets that simply have no sibling test_config.json.
+  """
+  evalset_path = tmp_path / 'weather.test.toml'
+  evalset_path.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert len(_saved_result_files(results_dir)) == 1

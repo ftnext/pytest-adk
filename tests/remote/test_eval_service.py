@@ -822,3 +822,103 @@ async def test_pinned_session_without_state_is_still_allowed() -> None:
   assert _pinned_session_state_error(eval_case, 'sess-1') is None
   # And state without a pin is fine.
   assert _pinned_session_state_error(eval_case, None) is None
+
+
+async def test_shared_pinned_session_fails_only_the_conflicting_cases() -> None:
+  """Direct service callers bypass the CLI preflight, so detect it here too.
+
+  The conflicting cases must fail *without* stopping the generator: an
+  unrelated case in the same eval set still has to produce its result.
+  """
+  server = FakeApiServer()
+  server.scripts['ivan'] = _weather_script()
+  server.scripts['judy'] = _weather_script()
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+
+  probe = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='ivan', session_id='shared'
+  )
+  if getattr(probe, 'session_id', None) != 'shared':
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; pinning is not usable here.'
+    )
+
+  first = _weather_eval_case('shared_a', 'ivan')
+  first.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='ivan', session_id='shared'
+  )
+  second = _weather_eval_case('shared_b', 'ivan')
+  second.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='ivan', session_id='shared'
+  )
+  eval_set = EvalSet(
+      eval_set_id='shared_set',
+      eval_cases=[first, second, _weather_eval_case('ok_case', 'judy')],
+  )
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  assert len(inference_results) == 3
+  results_by_id = {r.eval_case_id: r for r in inference_results}
+
+  for case_id, other in (('shared_a', 'shared_b'), ('shared_b', 'shared_a')):
+    assert results_by_id[case_id].status == InferenceStatus.FAILURE
+    assert other in results_by_id[case_id].error_message
+    assert 'shared' in results_by_id[case_id].error_message
+
+  # The unrelated case ran normally.
+  assert results_by_id['ok_case'].status == InferenceStatus.SUCCESS
+  # Neither conflicting case touched the shared session.
+  assert all(req['sessionId'] != 'shared' for req in server.run_requests)
+
+
+async def test_distinct_pinned_sessions_are_not_flagged_by_the_service() -> None:
+  """Guard against over-rejecting: different pins are independent sessions."""
+  server = FakeApiServer()
+  server.scripts['ivan'] = _weather_script()
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+
+  first = _weather_eval_case('case_a', 'ivan')
+  first.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='ivan', session_id='sess-a'
+  )
+  if getattr(first.session_input, 'session_id', None) != 'sess-a':
+    pytest.skip('SessionInput does not retain an extra session_id field.')
+  second = _weather_eval_case('case_b', 'ivan')
+  second.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='ivan', session_id='sess-b'
+  )
+  eval_set = EvalSet(eval_set_id='distinct_set', eval_cases=[first, second])
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  assert all(
+      r.status == InferenceStatus.SUCCESS for r in inference_results
+  ), [r.error_message for r in inference_results]
+  assert {req['sessionId'] for req in server.run_requests} == {
+      'sess-a',
+      'sess-b',
+  }

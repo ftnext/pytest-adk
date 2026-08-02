@@ -227,6 +227,12 @@ class AdkApiClient:
 
     Raises:
         httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
+        ValueError: If the response body is not a JSON list of events. An
+            endpoint that answers 200 with an error object or a bare string
+            would otherwise iterate as its keys/characters -- or, for ``{}``,
+            yield nothing at all and be indistinguishable from a genuinely
+            silent turn, which is scored and persisted as if the agent had
+            answered.
     """
     body = {
         'appName': app_name,
@@ -238,7 +244,12 @@ class AdkApiClient:
     }
     response = await self._client.post('/run', json=body)
     response.raise_for_status()
-    return [Event.model_validate(event) for event in response.json()]
+    payload = response.json()
+    if not isinstance(payload, list):
+      raise ValueError(
+          f'POST /run did not return a JSON list of events, got {payload!r}.'
+      )
+    return [Event.model_validate(event) for event in payload]
 
   async def delete_session(
       self, *, app_name: str, user_id: str, session_id: str

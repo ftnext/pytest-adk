@@ -305,13 +305,19 @@ pytest-adk eval https://my-agent.example.com tests/evals/ \
 
 Results are saved via ADK's standard `LocalEvalSetResultsManager` layout,
 under `{results-dir}/{app-name}/.adk/eval_history/` (`--results-dir` defaults
-to the current directory). The save path is always printed after the run.
+to the current directory). That path is printed on stdout after the run, but
+**only when at least one eval set actually saved results**. If every eval case
+failed inference there is nothing to score or persist, so no file is written;
+the command says `No eval results were saved` on stderr instead and exits `2`.
+Automation parsing for the path should treat its absence as "nothing was
+saved" rather than waiting for it.
 
 The command exits `0` if every eval metric passed, `1` if at least one metric
 failed, and `2` on an execution error (bad `AGENT_URL`, a connection failure,
 `--app-name` resolution failure, an evalset or `--config-file-path` that cannot
 be loaded, `EVAL_SET_PATH`s that discover no evalset at all, two evalsets
-sharing one `eval_set_id`, an app name that is unusable as a path segment, a
+sharing one `eval_set_id`, an app name that is unusable as a path segment, an
+evalset whose evaluation criteria are empty so nothing would be scored, a
 failure to write the results, or any eval case whose inference failed).
 
 Because the app name can come from the remote server (`GET /list-apps`) and is

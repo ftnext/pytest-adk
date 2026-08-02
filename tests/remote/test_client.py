@@ -413,3 +413,26 @@ async def test_non_slash_specials_still_round_trip() -> None:
       await client.aclose()
     # Reached the route *and* arrived undamaged.
     assert server.create_session_requests[-1]['user_id'] == user_id
+
+
+@pytest.mark.parametrize('payload', [{}, {'detail': 'boom'}, 'oops', 7])
+async def test_run_rejects_a_non_list_payload(payload) -> None:
+  """A 200 that is not a list of events must not look like a silent turn.
+
+  ``{}`` is the dangerous one: iterating it yields nothing, so without this
+  check it was indistinguishable from an agent that legitimately said nothing
+  -- and got scored and persisted as an answer.
+  """
+  client = _client(lambda request: httpx.Response(200, json=payload))
+  try:
+    with pytest.raises(ValueError, match='did not return a JSON list'):
+      await client.run(
+          app_name='weather_agent',
+          user_id='u',
+          session_id='s',
+          new_message=types.Content(
+              role='user', parts=[types.Part(text='hi')]
+          ),
+      )
+  finally:
+    await client.aclose()
