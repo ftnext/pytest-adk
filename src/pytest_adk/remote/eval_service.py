@@ -113,6 +113,49 @@ def _pinned_session_id(eval_case: EvalCase) -> str | None:
   return session_id or None
 
 
+def _pinned_session_state_error(
+    eval_case: EvalCase, pinned_session_id: str | None
+) -> str | None:
+  """Reports an eval case that pins a session *and* declares initial state.
+
+  The two are mutually exclusive in practice: a pinned session is used as-is
+  and never created, so ``session_input.state`` is never sent anywhere and the
+  conversation runs against whatever state the pre-existing session already
+  holds. Silently ignoring a declared starting condition can only produce
+  scores for something other than what the evalset describes, so it is
+  rejected.
+
+  ``state`` defaults to ``{}`` (a pydantic ``default_factory``), not ``None``,
+  so only a *non-empty* mapping counts as declared -- an author who simply
+  omitted the field must not trip this.
+
+  Shared by the runtime and by ``pytest-adk eval``'s preflight so the two
+  cannot drift apart, in the manner of :func:`_pinned_session_id`.
+
+  Args:
+      eval_case: The eval case to check.
+      pinned_session_id: Its already-resolved pinned session id, or ``None``.
+
+  Returns:
+      ``None`` when there is no conflict, otherwise a ready-to-print message.
+  """
+  if pinned_session_id is None:
+    return None
+  session_input = eval_case.session_input
+  state = getattr(session_input, 'state', None) if session_input else None
+  if not state:
+    return None
+  return (
+      f"Eval case '{eval_case.eval_id}' both pins an existing remote session"
+      f' (session_input.session_id {pinned_session_id!r}) and declares'
+      ' session_input.state. A pinned session is used as-is and never'
+      ' created, so that state would never be applied and the conversation'
+      ' would run against whatever the session already holds. Drop the'
+      ' session_id to start from the declared state, or drop the state to'
+      " accept the pinned session's own."
+  )
+
+
 def _resolved_user_id(eval_case: EvalCase, default_user_id: str) -> str:
   """Returns the user an eval case's remote session belongs to.
 
@@ -375,6 +418,10 @@ class RemoteEvalService(LocalEvalService):
       # input up front, but direct RemoteEvalService callers bypass that.
       requested_session_id = _pinned_session_id(eval_case)
       session_id = requested_session_id
+
+      state_error = _pinned_session_state_error(eval_case, requested_session_id)
+      if state_error is not None:
+        raise ValueError(state_error)
 
       if requested_session_id is None:
         session = await self._client.create_session(

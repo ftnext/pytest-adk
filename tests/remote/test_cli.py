@@ -1697,3 +1697,67 @@ def test_eval_case_with_no_turns_exits_two(tmp_path, capsys) -> None:
   assert server.run_requests == []
   assert 'Eval results saved under' not in captured.out
   assert not results_dir.exists()
+
+
+def test_pinned_session_with_state_is_rejected_by_preflight(
+    tmp_path, capsys
+) -> None:
+  """The CLI rejects the combination before any inference runs."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'conflict.test.toml'
+  evalset_path.write_text(
+      _REUSED_SESSION_EVAL_SET_TOML.replace(
+          'session_id = "pre-existing-session"',
+          'session_id = "pre-existing-session"\nstate = { locale = "en-US" }',
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'declares session_input.state' in err
+  assert 'reuse_case' in err
+  assert 'Traceback' not in err
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_user_id_with_slash_is_an_argparse_error(tmp_path, capsys) -> None:
+  """A slashed --user-id can never be addressed, so fail before connecting."""
+  evalset_path = _write_evalset(tmp_path)
+
+  try:
+    main([
+        'eval',
+        _AGENT_URL,
+        str(evalset_path),
+        '--user-id',
+        'teams/acme',
+    ])
+    raised = False
+  except SystemExit as e:
+    raised = True
+    assert e.code == 2
+
+  assert raised
+  assert '--user-id' in capsys.readouterr().err

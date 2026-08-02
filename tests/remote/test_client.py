@@ -317,7 +317,12 @@ async def test_async_context_manager_closes_client() -> None:
 
 
 async def test_create_session_escapes_reserved_path_characters() -> None:
-  """A user_id containing '/' must address one user, not a deeper subpath."""
+  """Characters that httpx would mangle are encoded into one segment.
+
+  A literal '/' is rejected instead (see
+  test_slash_in_path_segment_is_rejected) because no encoding survives
+  FastAPI routing; everything else must be carried safely.
+  """
   captured: dict[str, Any] = {}
 
   def handler(request: httpx.Request) -> httpx.Response:
@@ -327,7 +332,7 @@ async def test_create_session_escapes_reserved_path_characters() -> None:
         json={
             'id': 's1',
             'appName': 'weather_agent',
-            'userId': 'teams/acme',
+            'userId': 'a b',
             'state': {},
             'events': [],
             'lastUpdateTime': 0.0,
@@ -336,14 +341,11 @@ async def test_create_session_escapes_reserved_path_characters() -> None:
 
   client = _client(handler)
   try:
-    await client.create_session(app_name='weather_agent', user_id='teams/acme')
+    await client.create_session(app_name='weather_agent', user_id='a b')
   finally:
     await client.aclose()
 
-  assert (
-      captured['raw_path']
-      == '/apps/weather_agent/users/teams%2Facme/sessions'
-  )
+  assert captured['raw_path'] == '/apps/weather_agent/users/a%20b/sessions'
 
 
 async def test_delete_session_escapes_reserved_path_characters() -> None:
@@ -357,15 +359,57 @@ async def test_delete_session_escapes_reserved_path_characters() -> None:
   client = _client(handler)
   try:
     await client.delete_session(
-        app_name='weather_agent', user_id='..', session_id='a b/c'
+        app_name='weather_agent', user_id='..', session_id='a b'
     )
   finally:
     await client.aclose()
 
-  # Without escaping, httpx resolves '..' away against '/users' (yielding
-  # /apps/weather_agent/sessions/...) and splits 'a b/c' across two segments,
-  # so the request would hit a different endpoint entirely.
+  # Without escaping, httpx resolves '..' away against '/users', yielding
+  # /apps/weather_agent/sessions/... -- a different endpoint entirely.
   assert (
       captured['raw_path']
-      == '/apps/weather_agent/users/%2E%2E/sessions/a%20b%2Fc'
+      == '/apps/weather_agent/users/%2E%2E/sessions/a%20b'
   )
+
+
+async def test_slash_in_path_segment_is_rejected() -> None:
+  """An encoded slash cannot survive FastAPI routing, so reject it up front.
+
+  ``%2F`` is decoded back into a separator before the route is matched, so
+  such a value produces a 404 rather than addressing one segment. Verified
+  end-to-end against the FastAPI fake server in
+  ``test_slash_user_id_would_404_against_a_real_router``.
+  """
+  client = _client(lambda request: httpx.Response(200))
+  try:
+    with pytest.raises(ValueError, match='must not contain'):
+      await client.create_session(
+          app_name='weather_agent', user_id='teams/acme'
+      )
+    with pytest.raises(ValueError, match='must not contain'):
+      await client.delete_session(
+          app_name='weather_agent', user_id='u', session_id='a/b'
+      )
+  finally:
+    await client.aclose()
+
+
+async def test_non_slash_specials_still_round_trip() -> None:
+  """Only '/' is unusable; everything else must still reach the server.
+
+  Guards against over-rejecting: '..' and friends were fixed by encoding in
+  an earlier round and must keep working.
+  """
+  from .fake_server import FakeApiServer
+
+  for user_id in ['..', '.', 'a b', 'a?b', 'a#b', 'a%2Fb', 'a\\b']:
+    server = FakeApiServer()
+    client = AdkApiClient(
+        'http://fake', transport=httpx.ASGITransport(app=server.build_app())
+    )
+    try:
+      await client.create_session(app_name='weather_agent', user_id=user_id)
+    finally:
+      await client.aclose()
+    # Reached the route *and* arrived undamaged.
+    assert server.create_session_requests[-1]['user_id'] == user_id

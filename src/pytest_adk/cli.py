@@ -111,6 +111,23 @@ def _agent_url(value: str) -> str:
   return value
 
 
+def _user_id(value: str) -> str:
+  """argparse ``type=`` for ``--user-id``: usable as one REST path segment.
+
+  The api_server routes ``/users/{user_id}/`` as a single path segment and an
+  encoded slash is decoded back into a separator before routing, so a slashed
+  user id cannot be addressed at all. ``AdkApiClient`` rejects it too (which
+  is what protects a per-eval-case ``session_input.user_id``); catching the
+  global flag here turns it into an argparse error before any HTTP call
+  instead of an identical failure on every eval case.
+  """
+  if '/' in value:
+    raise argparse.ArgumentTypeError(
+        f'--user-id must not contain "/", got {value!r}.'
+    )
+  return value
+
+
 def _positive_int(value: str) -> int:
   """argparse ``type=`` for an integer flag that must be >= 1."""
   try:
@@ -205,6 +222,7 @@ def _build_parser() -> argparse.ArgumentParser:
   )
   eval_parser.add_argument(
       '--user-id',
+      type=_user_id,
       default=_DEFAULT_USER_ID,
       help=(
           'Default user_id used to create remote sessions (default:'
@@ -331,6 +349,7 @@ async def _run_eval(
     # branch in _perform_remote_inference_single_eval_item share one predicate by
     # construction and cannot drift apart.
     from .remote.eval_service import _pinned_session_id
+    from .remote.eval_service import _pinned_session_state_error
     from .remote.eval_service import _resolved_user_id
     from .remote.eval_service import RemoteEvalService
   except ModuleNotFoundError as e:
@@ -424,7 +443,13 @@ async def _run_eval(
     try:
       for eval_set, _ in eval_sets:
         for eval_case in eval_set.eval_cases:
-          _pinned_session_id(eval_case)
+          pinned = _pinned_session_id(eval_case)
+          # A pinned session is never created, so a declared initial state
+          # would silently never be applied. Same shared-helper treatment as
+          # the predicate itself, so preflight and runtime agree.
+          state_error = _pinned_session_state_error(eval_case, pinned)
+          if state_error is not None:
+            raise ValueError(state_error)
     except ValueError as e:
       print(str(e), file=sys.stderr)
       return EXIT_ERROR

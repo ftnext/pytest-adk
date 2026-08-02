@@ -42,21 +42,44 @@ from google.adk.sessions import Session
 from google.genai import types
 
 
-def _quote(path_segment: str) -> str:
+def _quote(path_segment: str, *, field: str) -> str:
   """Percent-encode one dynamic REST path segment.
 
-  ``safe=''`` because these values are single path segments: a ``user_id`` of
-  ``'teams/acme'`` must address one user, not the ``/users/teams/acme/``
-  subpath. httpx escapes some characters when normalizing a URL (a space
-  becomes ``%20``) but leaves ``/`` alone, and silently resolves ``..``
-  against the preceding segment -- so the encoding has to happen here.
+  ``safe=''`` because these values are single path segments: httpx escapes
+  some characters when normalizing a URL (a space becomes ``%20``) but leaves
+  reserved ones alone, and silently resolves ``..`` against the preceding
+  segment -- so the encoding has to happen here.
 
   Dots are *unreserved* in RFC 3986, so ``quote()`` alone leaves ``'.'`` and
   ``'..'`` intact and the dot-segment removal in URL resolution would still
   drop or rewrite them. An all-dots segment therefore gets its dots
   percent-encoded explicitly; ``%2E`` is equivalent to ``.`` for a server
   decoding the segment, but is no longer a dot-segment during resolution.
+
+  A literal ``/`` is rejected outright rather than encoded. ``%2F`` does not
+  help: an ADK ``api_server`` is a FastAPI/ASGI app whose router matches the
+  *decoded* ``scope['path']``, so the encoded slash turns back into a
+  separator before ``/apps/{app_name}/users/{user_id}/sessions`` is matched
+  and the request 404s. There is no way to carry a slash in one of these path
+  parameters, so a clear error beats a mystifying 404 mid-run. (Verified
+  against a real FastAPI router: every other character tried -- ``.``,
+  ``..``, spaces, ``?``, ``#``, ``\\``, even a literal ``%2F`` -- round-trips
+  to the server unchanged; only ``/`` breaks.)
+
+  Args:
+      path_segment: The value to place in one path segment.
+      field: Name of the field the value came from, for the error message.
+
+  Raises:
+      ValueError: If ``path_segment`` contains ``/``.
   """
+  if '/' in path_segment:
+    raise ValueError(
+        f'{field} {path_segment!r} must not contain "/": the api_server'
+        ' routes these as single path segments, and an encoded slash is'
+        ' decoded back into a separator before routing, so such a value'
+        ' cannot be addressed at all.'
+    )
   quoted = urllib.parse.quote(path_segment, safe='')
   if quoted and set(quoted) == {'.'}:
     return quoted.replace('.', '%2E')
@@ -174,7 +197,8 @@ class AdkApiClient:
     if state is not None:
       body['state'] = state
     response = await self._client.post(
-        f'/apps/{_quote(app_name)}/users/{_quote(user_id)}/sessions',
+        f'/apps/{_quote(app_name, field="app_name")}'
+        f'/users/{_quote(user_id, field="user_id")}/sessions',
         json=body,
     )
     response.raise_for_status()
@@ -230,7 +254,8 @@ class AdkApiClient:
         httpx.HTTPStatusError: If the server responds with a 4xx/5xx status.
     """
     response = await self._client.delete(
-        f'/apps/{_quote(app_name)}/users/{_quote(user_id)}'
-        f'/sessions/{_quote(session_id)}'
+        f'/apps/{_quote(app_name, field="app_name")}'
+        f'/users/{_quote(user_id, field="user_id")}'
+        f'/sessions/{_quote(session_id, field="session_id")}'
     )
     response.raise_for_status()

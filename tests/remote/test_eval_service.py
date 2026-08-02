@@ -18,6 +18,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+import httpx
 import pytest
 from google.adk.evaluation.base_eval_service import EvaluateConfig
 from google.adk.evaluation.base_eval_service import EvaluateRequest
@@ -39,6 +40,7 @@ from google.adk.evaluation.local_eval_service import LocalEvalService
 from google.genai import types
 
 from pytest_adk.remote.eval_service import _pinned_session_id
+from pytest_adk.remote.eval_service import _pinned_session_state_error
 from pytest_adk.remote.eval_service import RemoteEvalService
 
 from .fake_server import FakeApiServer
@@ -438,10 +440,13 @@ async def test_existing_session_is_reused_and_never_created_or_deleted() -> (
   # An explicit session_id means "use this pre-existing remote session".
   # SessionInput doesn't declare the field, but google-adk v2's model config
   # allows extras (checked above via the version-agnostic probe).
+  # No `state` here: a pinned session is used as-is and never created, so
+  # declaring an initial state alongside it is now rejected as a conflict
+  # (see test_pinned_session_with_declared_state_fails_that_case). This test
+  # is about the reuse itself.
   eval_case.session_input = SessionInput.model_construct(
       app_name=_REMOTE_APP_NAME,
       user_id='carol',
-      state={'locale': 'en-US'},
       session_id='pre-existing-session',
   )
   eval_set = EvalSet(eval_set_id='weather_set', eval_cases=[eval_case])
@@ -724,3 +729,96 @@ async def test_malformed_session_id_fails_only_its_own_eval_case() -> None:
   assert ok_result.status == InferenceStatus.SUCCESS
   assert ok_result.inferences is not None
   assert len(ok_result.inferences) == 2  # both turns
+
+
+async def test_slash_user_id_would_404_against_a_real_router() -> None:
+  """Why a slash is rejected rather than encoded.
+
+  Asserting on the outgoing URL alone would not catch this: the request is
+  well-formed, but FastAPI matches the *decoded* path, so ``%2F`` becomes a
+  separator again and the route does not match. Bypasses AdkApiClient's own
+  guard to demonstrate the server-side behavior it exists to prevent.
+  """
+  server = FakeApiServer()
+  transport = httpx.ASGITransport(app=server.build_app())
+  async with httpx.AsyncClient(
+      base_url='http://fake', transport=transport
+  ) as raw:
+    response = await raw.post(
+        '/apps/weather_agent/users/teams%2Facme/sessions', json={}
+    )
+
+  assert response.status_code == 404
+  assert server.create_session_requests == []
+
+
+async def test_pinned_session_with_declared_state_fails_that_case() -> None:
+  """Declared state is never applied to a pinned session, so reject the combo."""
+  server = FakeApiServer()
+  server.scripts['heidi'] = _weather_script()
+  client = _client_for(server)
+  eval_sets_manager = InMemoryEvalSetsManager()
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=eval_sets_manager,
+  )
+
+  conflicted = _weather_eval_case('conflicted_case', 'heidi')
+  conflicted.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME,
+      user_id='heidi',
+      state={'locale': 'en-US'},
+      session_id='pre-existing-session',
+  )
+  if getattr(conflicted.session_input, 'session_id', None) != (
+      'pre-existing-session'
+  ):
+    pytest.skip(
+        "This google-adk version's SessionInput does not retain an extra"
+        ' session_id field; pinning is not usable here.'
+    )
+
+  eval_set = EvalSet(
+      eval_set_id='conflict_set',
+      eval_cases=[conflicted, _weather_eval_case('ok_case', 'heidi')],
+  )
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  results_by_id = {r.eval_case_id: r for r in inference_results}
+  assert results_by_id['conflicted_case'].status == InferenceStatus.FAILURE
+  assert 'declares session_input.state' in (
+      results_by_id['conflicted_case'].error_message
+  )
+  # Isolated: the valid neighbour still ran.
+  assert results_by_id['ok_case'].status == InferenceStatus.SUCCESS
+  # The conflicted case never touched the remote session.
+  assert all(
+      req['sessionId'] != 'pre-existing-session'
+      for req in server.run_requests
+  )
+
+
+async def test_pinned_session_without_state_is_still_allowed() -> None:
+  """state defaults to {}, so an omitted state must not trip the check."""
+  eval_case = EvalCase(eval_id='c', conversation=[])
+  eval_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='u', session_id='sess-1'
+  )
+  if getattr(eval_case.session_input, 'session_id', None) != 'sess-1':
+    pytest.skip('SessionInput does not retain an extra session_id field.')
+
+  assert _pinned_session_state_error(eval_case, 'sess-1') is None
+  # An explicitly empty state is equally not "declared".
+  eval_case.session_input = SessionInput.model_construct(
+      app_name=_REMOTE_APP_NAME, user_id='u', state={}, session_id='sess-1'
+  )
+  assert _pinned_session_state_error(eval_case, 'sess-1') is None
+  # And state without a pin is fine.
+  assert _pinned_session_state_error(eval_case, None) is None
