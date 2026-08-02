@@ -82,6 +82,10 @@ class FakeApiServer:
     # matching httpx/Starlette's own normalization). Used by tests to verify
     # ``--header``/``headers=`` actually reach the server.
     self.received_headers: list[dict[str, str]] = []
+    # The same headers as ``(name, value)`` pairs. ``dict(request.headers)``
+    # keeps only the first value when a header name repeats, so tests about
+    # repeated headers (e.g. two ``Cookie`` fields) need the raw pairs.
+    self.received_header_pairs: list[list[tuple[str, str]]] = []
 
   def build_app(self) -> FastAPI:
     app = FastAPI()
@@ -89,6 +93,9 @@ class FakeApiServer:
     @app.get('/list-apps')
     async def list_apps(request: Request) -> list[str]:
       self.received_headers.append(dict(request.headers))
+      self.received_header_pairs.append(
+          [(k.decode(), v.decode()) for k, v in request.headers.raw]
+      )
       return self.app_names
 
     @app.post('/apps/{app_name}/users/{user_id}/sessions')
@@ -96,6 +103,9 @@ class FakeApiServer:
         app_name: str, user_id: str, request: Request
     ) -> JSONResponse:
       self.received_headers.append(dict(request.headers))
+      self.received_header_pairs.append(
+          [(k.decode(), v.decode()) for k, v in request.headers.raw]
+      )
       body = await request.json()
       self.create_session_requests.append(
           {'app_name': app_name, 'user_id': user_id, 'body': body}
@@ -116,6 +126,9 @@ class FakeApiServer:
     @app.post('/run')
     async def run(request: Request):
       self.received_headers.append(dict(request.headers))
+      self.received_header_pairs.append(
+          [(k.decode(), v.decode()) for k, v in request.headers.raw]
+      )
       body = await request.json()
       self.run_requests.append(body)
       user_id = body['userId']
@@ -147,6 +160,9 @@ class FakeApiServer:
         app_name: str, user_id: str, session_id: str, request: Request
     ) -> Response:
       self.received_headers.append(dict(request.headers))
+      self.received_header_pairs.append(
+          [(k.decode(), v.decode()) for k, v in request.headers.raw]
+      )
       self.deleted_session_ids.append(session_id)
       return Response(status_code=200)
 

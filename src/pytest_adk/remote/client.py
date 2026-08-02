@@ -34,6 +34,7 @@ from __future__ import annotations
 import urllib.parse
 from types import TracebackType
 from typing import Any
+from typing import Sequence
 
 import httpx
 from google.adk.events import Event
@@ -78,7 +79,7 @@ class AdkApiClient:
       self,
       base_url: str,
       *,
-      headers: dict[str, str] | None = None,
+      headers: dict[str, str] | Sequence[tuple[str, str]] | None = None,
       timeout: float = 300.0,
       transport: httpx.AsyncBaseTransport | None = None,
   ) -> None:
@@ -87,7 +88,9 @@ class AdkApiClient:
     Args:
         base_url: Base URL of the api_server, e.g. ``http://localhost:8000``.
         headers: Extra HTTP headers sent with every request, e.g.
-            ``{'Authorization': 'Bearer ...'}``.
+            ``{'Authorization': 'Bearer ...'}``. A sequence of ``(name,
+            value)`` pairs is also accepted, and is what the CLI passes, so
+            that a header name may legitimately repeat.
         timeout: Per-request timeout in seconds. Agent inference can be slow,
             hence the generous default.
         transport: Optional ``httpx`` transport, forwarded to

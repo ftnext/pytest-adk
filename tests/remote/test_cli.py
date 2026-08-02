@@ -1508,3 +1508,183 @@ parts = [ { text = "It is sunny in Tokyo." } ]
   assert 'Eval results saved under' in captured.out
   assert 'No eval results were saved' not in captured.err
   assert len(_saved_result_files(results_dir)) == 1
+
+
+def test_repeated_header_values_all_reach_the_server(tmp_path) -> None:
+  """A repeated header name must not collapse to its last value."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--header',
+          'Cookie: first=a',
+          '--header',
+          'Cookie: second=b',
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  assert server.received_header_pairs
+  # Asserted on the raw pairs, not the dict: dict(request.headers) keeps only
+  # the first value for a repeated name, which would hide the collapse this
+  # test is about.
+  for pairs in server.received_header_pairs:
+    cookies = [value for name, value in pairs if name.lower() == 'cookie']
+    assert cookies == ['first=a', 'second=b']
+
+
+def test_drive_qualified_app_name_is_rejected(tmp_path, capsys) -> None:
+  """'C:outside' has no separator but escapes --results-dir on Windows."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          'C:outside',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  assert 'Refusing to use app name' in capsys.readouterr().err
+  assert not results_dir.exists()
+  assert server.run_requests == []
+
+
+def test_non_string_session_id_is_rejected(tmp_path, capsys) -> None:
+  """`session_id = 123` is a mistake, not an "unpinned" spelling."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'badtype.test.toml'
+  evalset_path.write_text(
+      _REUSED_SESSION_EVAL_SET_TOML.replace(
+          'session_id = "pre-existing-session"', 'session_id = 123'
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'non-string' in err
+  assert 'reuse_case' in err
+  assert 'Traceback' not in err
+  # Not silently run against a fresh session.
+  assert server.run_requests == []
+
+
+def test_empty_string_session_id_still_means_unpinned(tmp_path, capsys) -> None:
+  """The '' sentinel keeps working: only a wrong *type* is an error."""
+  _skip_without_session_id_support()
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'empty.test.toml'
+  evalset_path.write_text(
+      _REUSED_SESSION_EVAL_SET_TOML.replace(
+          'session_id = "pre-existing-session"', 'session_id = ""'
+      ),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert len(server.create_session_requests) == 1
+
+
+def test_eval_case_with_no_turns_exits_two(tmp_path, capsys) -> None:
+  """`conversation = []` must not be scored as a successful inference."""
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  evalset_path = tmp_path / 'noturns.test.toml'
+  evalset_path.write_text(
+      'eval_set_id = "noturns_set"\n\n'
+      '[[eval_cases]]\n'
+      'eval_id = "noturns_case"\n'
+      'conversation = []\n',
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  captured = capsys.readouterr()
+  assert 'INFERENCE FAILED' in captured.err
+  assert 'noturns_case' in captured.err
+  # Never contacted the agent, and nothing was scored or saved.
+  assert server.run_requests == []
+  assert 'Eval results saved under' not in captured.out
+  assert not results_dir.exists()

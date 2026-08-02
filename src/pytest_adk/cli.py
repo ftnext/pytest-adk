@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ntpath
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -336,7 +337,11 @@ async def _run_eval(
     print(str(e), file=sys.stderr)
     return EXIT_ERROR
 
-  headers = dict(args.headers) if args.headers else None
+  # A list of pairs, not a dict: HTTP allows a header name to repeat (two
+  # Cookie fields, a repeated proxy scope header), --header is documented as
+  # repeatable, and httpx accepts the pair sequence as-is. dict() would keep
+  # only the last occurrence and silently alter auth/routing context.
+  headers = list(args.headers) if args.headers else None
   try:
     client = AdkApiClient(
         args.agent_url,
@@ -412,6 +417,18 @@ async def _run_eval(
     # sees num_runs: the CLI drives the repeat loop itself (see
     # _run_and_evaluate_eval_set), so this is the only layer that can observe
     # the conflict.
+    # Run the shared predicate over every eval case once, up front: it rejects
+    # a non-string session_id (google-adk v2 keeps extra fields without
+    # validating their types), and both guards below call it, so validating
+    # here keeps that ValueError from escaping either of them as a traceback.
+    try:
+      for eval_set, _ in eval_sets:
+        for eval_case in eval_set.eval_cases:
+          _pinned_session_id(eval_case)
+    except ValueError as e:
+      print(str(e), file=sys.stderr)
+      return EXIT_ERROR
+
     if args.num_runs > 1:
       reused_session_case_ids = [
           eval_case.eval_id
@@ -643,6 +660,15 @@ def _app_name_path_error(app_name: str) -> str | None:
     reason = 'must not contain path separators'
   elif app_name in ('.', '..'):
     reason = 'must not be a path traversal segment'
+  elif ntpath.splitdrive(app_name)[0]:
+    # A drive-qualified name such as 'C:' or 'C:outside' contains no
+    # separator and is not a dot segment, but Windows path joining treats it
+    # as drive-relative and discards the --results-dir prefix entirely
+    # (ntpath.join('results', 'C:outside') == 'C:outside'). Checked with
+    # ntpath on every platform, not just Windows, so the same evalset and the
+    # same remote /list-apps response are accepted or rejected identically
+    # everywhere.
+    reason = 'must not be drive-qualified'
   if reason is None:
     return None
   return (

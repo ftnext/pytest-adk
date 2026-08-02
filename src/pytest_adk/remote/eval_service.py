@@ -82,17 +82,35 @@ def _pinned_session_id(eval_case: EvalCase) -> str | None:
   session?", shared by the runtime path here and by ``pytest-adk eval``'s
   ``--num-runs`` guard, so the two cannot drift apart.
 
+  A value that is present but neither a string nor ``None`` (google-adk v2
+  keeps extra fields without validating their types, so ``session_id = 123``
+  in a TOML evalset arrives here as an ``int``) is rejected rather than
+  quietly treated as unpinned: silently creating a fresh session would run the
+  eval case against different state and history than the evalset asked for.
+
   Returns:
       The pinned session ID, or ``None`` when the eval case should get a
       freshly created session.
+
+  Raises:
+      ValueError: If ``session_id`` is set to a non-string value.
   """
   session_input = eval_case.session_input
   if session_input is None:
     return None
   session_id = getattr(session_input, 'session_id', None)
-  if isinstance(session_id, str) and session_id:
-    return session_id
-  return None
+  if session_id is None:
+    return None
+  if not isinstance(session_id, str):
+    raise ValueError(
+        f"Eval case '{eval_case.eval_id}' has a non-string"
+        f' session_input.session_id ({session_id!r}, type'
+        f' {type(session_id).__name__}). Quote it to pin an existing remote'
+        ' session, or remove it to get a fresh session per run.'
+    )
+  # An empty string is the documented "not pinned" spelling (see above), not
+  # an error: unlike a wrong type, it is the only way TOML can express it.
+  return session_id or None
 
 
 def _resolved_user_id(eval_case: EvalCase, default_user_id: str) -> str:
@@ -323,6 +341,21 @@ class RemoteEvalService(LocalEvalService):
           "RemoteEvalService does not support conversation_scenario-driven"
           " eval cases (user-simulator multi-turn) in v1; eval case"
           f" '{eval_case.eval_id}' has no static conversation."
+      )
+      return inference_result
+
+    if not eval_case.conversation:
+      # A schema-valid `conversation = []`. Left alone, the turn loop below
+      # would make no /run calls at all, convert an empty event list into
+      # empty inferences, and still report SUCCESS -- handing scoring a
+      # result produced without ever contacting the deployed agent, whose
+      # empty-aggregate metric behavior can then look like a verdict. There
+      # is nothing to evaluate, so say so instead.
+      inference_result.status = InferenceStatus.FAILURE
+      inference_result.error_message = (
+          f"Eval case '{eval_case.eval_id}' has an empty conversation: there"
+          ' are no turns to send to the remote agent, so nothing can be'
+          ' inferred or scored.'
       )
       return inference_result
 
