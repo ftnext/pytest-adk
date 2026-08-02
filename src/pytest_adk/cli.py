@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import NamedTuple
 from typing import Sequence
 
 import httpx
@@ -73,6 +74,21 @@ _ADK_EVAL_HISTORY_SUBDIR = Path('.adk') / 'eval_history'
 EXIT_SUCCESS = 0
 EXIT_METRIC_FAILURE = 1
 EXIT_ERROR = 2
+
+
+class _EvalSetOutcome(NamedTuple):
+  """What running and scoring one eval set produced.
+
+  ``saved_results`` exists because the other two flags cannot distinguish
+  "everything passed" from "nothing was scorable": when every inference fails,
+  there is nothing to hand to ``evaluate()``, so no result file is written and
+  both failure flags stay false. The caller needs that difference to avoid
+  pointing at a results path that was never created.
+  """
+
+  had_inference_failure: bool
+  had_metric_failure: bool
+  saved_results: bool
 
 
 def _agent_url(value: str) -> str:
@@ -505,24 +521,24 @@ async def _run_eval(
 
     had_inference_failure = False
     had_metric_failure = False
+    saved_any_results = False
     try:
       for eval_set, eval_config in eval_sets:
-        set_had_inference_failure, set_had_metric_failure = (
-            await _run_and_evaluate_eval_set(
-                service,
-                results_manager,
-                app_name=app_name,
-                eval_set=eval_set,
-                eval_config=eval_config,
-                num_runs=args.num_runs,
-                parallelism=args.parallelism,
-                print_detailed_results=args.print_detailed_results,
-            )
+        outcome = await _run_and_evaluate_eval_set(
+            service,
+            results_manager,
+            app_name=app_name,
+            eval_set=eval_set,
+            eval_config=eval_config,
+            num_runs=args.num_runs,
+            parallelism=args.parallelism,
+            print_detailed_results=args.print_detailed_results,
         )
         had_inference_failure = (
-            had_inference_failure or set_had_inference_failure
+            had_inference_failure or outcome.had_inference_failure
         )
-        had_metric_failure = had_metric_failure or set_had_metric_failure
+        had_metric_failure = had_metric_failure or outcome.had_metric_failure
+        saved_any_results = saved_any_results or outcome.saved_results
     except Exception as e:  # noqa: BLE001 - scoring/persistence failed outright
       # Scoring or writing the results failed (e.g. --results-dir is not
       # writable, so save_eval_set_result raises OSError). Without this, the
@@ -534,8 +550,20 @@ async def _run_eval(
   finally:
     await client.aclose()
 
-  eval_history_dir = Path(args.results_dir) / app_name / _ADK_EVAL_HISTORY_SUBDIR
-  print(f'Eval results saved under: {eval_history_dir}')
+  if saved_any_results:
+    eval_history_dir = (
+        Path(args.results_dir) / app_name / _ADK_EVAL_HISTORY_SUBDIR
+    )
+    print(f'Eval results saved under: {eval_history_dir}')
+  else:
+    # Every eval case failed inference, so evaluate() was never called and no
+    # result file exists. Printing the path anyway would point users and
+    # automation at an artifact that was never written.
+    print(
+        'No eval results were saved: no eval case produced a scorable'
+        ' inference result.',
+        file=sys.stderr,
+    )
 
   if had_inference_failure:
     return EXIT_ERROR
@@ -752,7 +780,7 @@ async def _run_and_evaluate_eval_set(
     num_runs: int,
     parallelism: int,
     print_detailed_results: bool,
-) -> tuple[bool, bool]:
+) -> _EvalSetOutcome:
   """Runs inference + evaluation for one eval set, saves, and reports results.
 
   Runs ``num_runs`` ``InferenceRequest``s (mirroring
@@ -783,8 +811,9 @@ async def _run_and_evaluate_eval_set(
       print_detailed_results: Whether to also print passing metric results.
 
   Returns:
-      A ``(had_inference_failure, had_metric_failure)`` tuple for this eval
-      set.
+      An :class:`_EvalSetOutcome` for this eval set. ``saved_results`` is
+      false when no inference succeeded, since ``evaluate()`` is then never
+      called and no result file is written.
   """
   inference_results: list[InferenceResult] = []
   for _ in range(num_runs):
@@ -810,6 +839,7 @@ async def _run_and_evaluate_eval_set(
       )
 
   had_metric_failure = False
+  saved_results = False
   if success_results:
     eval_metrics = get_eval_metrics_from_config(eval_config)
     evaluate_request = EvaluateRequest(
@@ -827,13 +857,18 @@ async def _run_and_evaluate_eval_set(
         eval_set_id=eval_set.eval_set_id,
         eval_case_results=eval_case_results,
     )
+    saved_results = True
     for eval_case_result in eval_case_results:
       if _print_eval_case_result(
           eval_case_result, print_detailed_results=print_detailed_results
       ):
         had_metric_failure = True
 
-  return had_inference_failure, had_metric_failure
+  return _EvalSetOutcome(
+      had_inference_failure=had_inference_failure,
+      had_metric_failure=had_metric_failure,
+      saved_results=saved_results,
+  )
 
 
 def _print_eval_case_result(

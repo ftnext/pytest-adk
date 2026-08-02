@@ -230,11 +230,15 @@ def test_fake_500_on_run_exits_two_and_reports_inference_failure(
   )
 
   assert exit_code == 2
-  err = capsys.readouterr().err
-  assert 'INFERENCE FAILED' in err
-  assert 'weather_case' in err
+  captured = capsys.readouterr()
+  assert 'INFERENCE FAILED' in captured.err
+  assert 'weather_case' in captured.err
   # Nothing to evaluate/save: the only inference result was a FAILURE.
   assert not results_dir.exists()
+  # So the run must not advertise a results path that was never written --
+  # it says so explicitly instead.
+  assert 'Eval results saved under' not in captured.out
+  assert 'No eval results were saved' in captured.err
 
 
 def test_connection_error_exits_two(tmp_path) -> None:
@@ -1385,3 +1389,122 @@ def test_duplicate_eval_id_within_evalset_exits_two(tmp_path, capsys) -> None:
   # A clean message, not a traceback.
   assert 'Traceback' not in err
   assert server.run_requests == []
+
+
+def test_all_cases_failing_reports_no_results_saved(tmp_path, capsys) -> None:
+  """With every case failing across several evalsets, no path is advertised.
+
+  Complements the single-evalset 500 case: the saved-path line is driven by
+  whether any eval set actually persisted results, so it must stay absent
+  when several evalsets all fail.
+  """
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  first = tmp_path / 'one.test.toml'
+  first.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+  second = tmp_path / 'two.test.toml'
+  second.write_text(
+      _WEATHER_EVAL_SET_TOML.replace('weather_set', 'weather_set_2'),
+      encoding='utf-8',
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  server.fail_run_with_status = 500
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(first),
+          str(second),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  captured = capsys.readouterr()
+  assert 'Eval results saved under' not in captured.out
+  assert 'No eval results were saved' in captured.err
+  assert not results_dir.exists()
+
+
+def test_partial_failure_still_reports_the_saved_path(tmp_path, capsys) -> None:
+  """One evalset failing must not suppress the path the other one wrote.
+
+  Guards the inverse mistake: the message is driven by "did anything save",
+  not by "did anything fail", so a mixed run still points at the results.
+  """
+  (tmp_path / 'test_config.json').write_text(
+      _TEST_CONFIG_JSON, encoding='utf-8'
+  )
+  ok_set = tmp_path / 'ok.test.toml'
+  ok_set.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
+  failing_set = tmp_path / 'failing.test.toml'
+  failing_set.write_text(
+      '''\
+eval_set_id = "failing_set"
+
+[[eval_cases]]
+eval_id = "failing_case"
+
+[eval_cases.session_input]
+app_name = "weather_agent"
+user_id = "broken_user"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = "what is the weather in Tokyo?" } ]
+
+[eval_cases.conversation.final_response]
+role = "model"
+parts = [ { text = "It is sunny in Tokyo." } ]
+''',
+      encoding='utf-8',
+  )
+
+  server = FakeApiServer()
+  # 'cli_user' is scripted and succeeds; 'broken_user' is set to fail
+  # outright, so only the second evalset's case fails inference.
+  server.scripts['cli_user'] = _matching_script()
+  server.fail_user_ids = {'broken_user'}
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(ok_set),
+          str(failing_set),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+      ],
+      transport=_transport_for(server),
+  )
+
+  captured = capsys.readouterr()
+  # An inference failure happened, so exit 2 -- unchanged semantics.
+  assert exit_code == 2
+  assert 'INFERENCE FAILED' in captured.err
+  # But the evalset that did succeed saved results, so the path is reported.
+  assert 'Eval results saved under' in captured.out
+  assert 'No eval results were saved' not in captured.err
+  assert len(_saved_result_files(results_dir)) == 1
