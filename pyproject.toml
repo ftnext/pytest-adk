@@ -21,6 +21,18 @@ classifiers = [
 ]
 dependencies = [
     "google-adk>=1.30.0,<3",
+    # Minimal subset of google-adk's [eval] extra needed to actually run
+    # evaluations (importing LocalEvalService requires pandas;
+    # response_match_score requires rouge-score; detailed result tables
+    # require tabulate). The full [eval] extra is avoided because it pulls in
+    # heavyweight dependencies such as gepa and
+    # google-cloud-aiplatform[evaluation]. Note: on google-adk v2, importing
+    # LocalEvalService additionally requires google-cloud-aiplatform (base is
+    # enough); pytest-adk does not force it on users and surfaces google-adk's
+    # own guidance instead.
+    "pandas>=2.2.3",
+    "rouge-score>=0.1.2",
+    "tabulate>=0.9",
     'tomli; python_version < "3.11"',
     "tomli-w",
 ]
@@ -33,9 +45,14 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "jinja2",
+    # google-adk v2's LocalEvalService import chain needs the vertexai module
+    # (base google-cloud-aiplatform), so tests that run real evaluations
+    # require it. Not a runtime dependency of pytest-adk itself.
+    "google-cloud-aiplatform",
 ]
 
 [project.scripts]
+pytest-adk = "pytest_adk.cli:main"
 pytest-adk-eval-schema = "pytest_adk.template:main"
 
 [project.entry-points.pytest11]
@@ -64,6 +81,7 @@ dependencies = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "google-adk>=2,<3",
+    "google-cloud-aiplatform",
 ]
 [tool.hatch.envs.test-adk2.scripts]
 run = "pytest {args}"
