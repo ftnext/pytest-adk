@@ -154,6 +154,52 @@ def _collect_eval_sets(
   return eval_sets
 
 
+def _register_custom_metrics_for_config(
+    eval_config: EvalConfig, eval_set_id: str
+) -> None:
+  """Teaches ADK's default metric registry about this config's custom metrics.
+
+  ``AgentEvaluator._get_eval_results_by_eval_id`` builds its
+  ``LocalEvalService`` without a ``metric_evaluator_registry``, so unlike
+  ``pytest-adk eval`` -- which passes its own -- this path can only reach
+  ADK's process-wide default registry, which is the object ADK's own
+  ``adk eval`` command registers into too.
+
+  Called per evalset, immediately before that evalset runs, so a run whose
+  evalsets carry different configs still scores each one with its own metric
+  functions. The registry is nevertheless process-wide state: two evalsets
+  that give one metric name two different meanings within a single pytest
+  session are a genuine conflict, which ``pytest-adk eval`` rejects outright
+  and this path cannot detect (see README).
+
+  The import is deferred rather than made at module scope because this module
+  is loaded by the pytest plugin at interpreter start-up, for every pytest run
+  in the environment. :mod:`pytest_adk.metrics` is importable on its own, but
+  the registry it reaches for needs google-adk's eval dependency chain (see
+  that module's docstring), and only a config that declares custom metrics has
+  any reason to pay for it.
+
+  Raises:
+      ValueError: If a configured custom metric cannot be resolved, or if a
+          metric named in ``criteria`` has no evaluator.
+  """
+  if not eval_config.custom_metrics:
+    # Nothing to register. The criteria check goes with it: it can only report
+    # what the registry knows, and without custom metrics that is exactly
+    # ADK's own built-in set -- so a misspelled built-in still fails where it
+    # always did rather than gaining a second, differently worded failure path
+    # on this side.
+    return
+
+  from .metrics import check_criteria_have_evaluators
+  from .metrics import default_metric_evaluator_registry
+  from .metrics import register_custom_metrics
+
+  registry = default_metric_evaluator_registry()
+  register_custom_metrics(registry, eval_config)
+  check_criteria_have_evaluators(registry, eval_config, eval_set_id=eval_set_id)
+
+
 class _AgentEvaluator:
   """ADK AgentEvaluator wrapper that persists local eval results.
 
@@ -276,6 +322,8 @@ class _AgentEvaluator:
       print_detailed_results: bool,
   ) -> None:
     """Run ADK evaluation for one ``EvalSet``, persist it, then assert metrics."""
+    _register_custom_metrics_for_config(eval_config, eval_set.eval_set_id)
+
     agent_for_eval = await _AdkAgentEvaluator._get_agent_for_eval(
         module_name=agent_module, agent_name=agent_name
     )

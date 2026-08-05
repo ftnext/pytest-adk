@@ -292,7 +292,8 @@ same `.test.json` / `.test.toml` discovery convention as the fixture.
 `--app-name` can be omitted when the server's `GET /list-apps` lists exactly
 one app. See `pytest-adk eval --help` for the full flag list (`--user-id`,
 `--config-file-path`, `--timeout`, `--parallelism`, `--results-dir`,
-`--prompt-template-engine`, `--keep-sessions`, `--print-detailed-results`).
+`--prompt-template-engine`, `--pythonpath`, `--keep-sessions`,
+`--print-detailed-results`).
 
 `<prompt:...>` markers in the evalsets are rendered the same way as on the
 fixture path, but the engine is selected with `--prompt-template-engine`
@@ -318,7 +319,9 @@ failed, and `2` on an execution error (bad `AGENT_URL`, a connection failure,
 be loaded, `EVAL_SET_PATH`s that discover no evalset at all, two evalsets
 sharing one `eval_set_id`, an app name that is unusable as a path segment, an
 evalset whose evaluation criteria are empty so nothing would be scored, a
-failure to write the results, or any eval case whose inference failed).
+custom metric that cannot be resolved or a criteria metric with no evaluator
+(see [Custom metrics](#custom-metrics)), a failure to write the results, or
+any eval case whose inference failed).
 
 Because the app name can come from the remote server (`GET /list-apps`) and is
 used as a directory name, one containing a path separator or a `..` traversal
@@ -327,6 +330,60 @@ segment is rejected rather than allowed to write results outside
 
 Scoring always runs locally: LLM-as-judge metrics use your own API key and
 billing, and only inference is delegated to the remote server.
+
+### Custom metrics
+
+An eval config can score with your own metric function instead of (or
+alongside) ADK's built-in metrics. Name the metric in both `criteria` and
+`custom_metrics`:
+
+```json
+{
+  "criteria": {
+    "tool_trajectory_avg_score": 1.0,
+    "answer_quality": 0.5
+  },
+  "custom_metrics": {
+    "answer_quality": {
+      "code_config": { "name": "my_project.eval_metrics.answer_quality" },
+      "description": "How well the answer matches the expected one."
+    }
+  }
+}
+```
+
+The function receives `(eval_metric, actual_invocations, expected_invocations,
+conversation_scenario)` and returns an ADK `EvaluationResult`. Both plain and
+`async def` functions work.
+
+No programmatic registration is needed: pytest-adk registers each configured
+custom metric with ADK's metric registry before the run — on the
+`pytest-adk eval` path and on the `AgentEvaluator` fixture path alike. Supply
+`metric_info` to describe a score range other than the default `[0.0, 1.0]`;
+its `metric_name` is always forced to the `custom_metrics` key, since that is
+what the registry is looked up by.
+
+Because a metric that cannot be scored should not cost a real inference run,
+`pytest-adk eval` resolves and imports every configured metric function
+**before** contacting the agent, and exits `2` with a message when a module
+cannot be imported, the function does not exist or is not callable, or a name
+in `criteria` has no evaluator at all.
+
+**Import paths.** A console script does not put the invocation directory on
+`sys.path`, so `pytest-adk eval` adds it: a metric module inside the project
+you run the command from is importable as written. For metric modules that
+live elsewhere, pass `--pythonpath PATH` (repeatable; its entries take
+precedence over the working directory). `sys.path` is restored when the
+command finishes.
+
+**Several evalsets in one run.** One `pytest-adk eval` invocation scores every
+evalset through a single metric registry, and a registry maps each metric
+*name* to one evaluator. If two loaded configs give one name two different
+meanings — different functions, different `metric_info`, or one config
+shadowing a built-in that another config uses plainly — the run is rejected
+with exit `2` rather than silently scoring one evalset with the other's
+metric. Rename the metric, make the definitions identical, or evaluate the
+evalsets in separate runs.
 
 ### Dependencies on google-adk v2
 
@@ -371,3 +428,11 @@ command prints a clear error instead of a traceback.
   listing. A deployment whose session service assigns ids in its own format
   and rejects the requested one is retried automatically without it, and the
   server-assigned id is used from then on.
+- ADK's metric registry is process-wide state. `pytest-adk eval` runs in its
+  own process and rejects configs that would collide (see
+  [Custom metrics](#custom-metrics)), but on the `AgentEvaluator` fixture path
+  the whole pytest session shares one registry — ADK's `AgentEvaluator` takes
+  no registry argument, so there is nothing else to register into. Each
+  evalset is registered immediately before it runs, so differing configs still
+  score with their own metric functions; two tests that give one metric name
+  two different meanings, however, are a conflict this path cannot detect.
