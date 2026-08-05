@@ -53,6 +53,13 @@ _MISSING_EVAL_DEPENDENCIES_MESSAGE = (
 
 try:
   from google.adk.evaluation.local_eval_service import LocalEvalService
+  # Same guard, same reason: on google-adk v2 this is the very module whose
+  # default-registry construction needs `vertexai`, so importing it outside
+  # the guard would turn the friendly message above back into a bare
+  # ModuleNotFoundError.
+  from google.adk.evaluation.metric_evaluator_registry import (
+      MetricEvaluatorRegistry,
+  )
 except ModuleNotFoundError as e:
   raise ModuleNotFoundError(_MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
 
@@ -288,6 +295,7 @@ class RemoteEvalService(LocalEvalService):
       default_user_id: str = 'eval_user',
       eval_set_results_manager: EvalSetResultsManager | None = None,
       keep_sessions: bool = False,
+      metric_evaluator_registry: MetricEvaluatorRegistry | None = None,
   ) -> None:
     """Create a RemoteEvalService bound to a running ``api_server``.
 
@@ -310,11 +318,18 @@ class RemoteEvalService(LocalEvalService):
             already existed (an eval case's ``session_input`` specifies an
             explicit ``session_id``) are never deleted, regardless of this
             flag.
+        metric_evaluator_registry: Registry ``evaluate()`` resolves metric
+            names through, forwarded to ``LocalEvalService`` unchanged.
+            ``None`` leaves ADK's process-wide default in place, which knows
+            only the built-in metrics; pass
+            :func:`pytest_adk.metrics.build_metric_evaluator_registry`'s
+            result to also score an ``EvalConfig``'s ``custom_metrics``.
     """
     super().__init__(
         root_agent=BaseAgent(name=_DUMMY_ROOT_AGENT_NAME),
         eval_sets_manager=eval_sets_manager,
         eval_set_results_manager=eval_set_results_manager,
+        metric_evaluator_registry=metric_evaluator_registry,
     )
     self._client = client
     self._app_name = app_name

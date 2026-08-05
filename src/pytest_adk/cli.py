@@ -25,9 +25,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import ntpath
+import os
 import sys
 from pathlib import Path
+from typing import Iterator
 from typing import NamedTuple
 from typing import Sequence
 
@@ -50,6 +53,9 @@ from google.adk.evaluation.local_eval_set_results_manager import (
 )
 
 from .evaluation import _collect_eval_sets
+from .metrics import build_metric_evaluator_registry
+from .metrics import check_criteria_have_evaluators
+from .metrics import check_custom_metrics_are_consistent
 from .remote.client import AdkApiClient
 
 _DEFAULT_USER_ID = 'eval_user'
@@ -137,6 +143,49 @@ def _positive_int(value: str) -> int:
   if parsed < 1:
     raise argparse.ArgumentTypeError(f'must be >= 1, got {value!r}.')
   return parsed
+
+
+def _importable_dir(value: str) -> str:
+  """argparse ``type=`` for ``--pythonpath``: an existing directory.
+
+  A path that does not exist would be added to ``sys.path`` without effect,
+  and the resulting failure ("could not import module ...") would point at the
+  metric rather than at the typo that caused it.
+  """
+  if not os.path.isdir(value):
+    raise argparse.ArgumentTypeError(
+        f'--pythonpath must be an existing directory, got {value!r}.'
+    )
+  return os.path.abspath(value)
+
+
+@contextlib.contextmanager
+def _importable_from(extra_paths: Sequence[str]) -> Iterator[None]:
+  """Makes ``extra_paths`` and the working directory importable, temporarily.
+
+  Custom metric functions are named by import path (``code_config.name``), and
+  they usually live in the project being evaluated. A console script -- unlike
+  ``python -m`` or ``python script.py`` -- does *not* put the invocation
+  directory on ``sys.path``, so without this a project-local metric module is
+  simply not importable and the run fails on a config that looks correct.
+
+  ``--pythonpath`` entries come first, then the working directory, so an
+  explicitly pointed-at directory wins over an accidental same-named module
+  next to the shell's cwd.
+
+  ``sys.path`` is restored on exit: ``main()`` is called in-process by the test
+  suite (and is importable as a library function), so it should not permanently
+  reshape the caller's import resolution. Modules already imported stay in
+  ``sys.modules``, which is what makes the later, in-scoring lookup by
+  ``_CustomMetricEvaluator`` resolve to the same function object.
+  """
+  original_sys_path = list(sys.path)
+  for path in reversed([*extra_paths, os.getcwd()]):
+    sys.path.insert(0, path)
+  try:
+    yield
+  finally:
+    sys.path[:] = original_sys_path
 
 
 def _header(value: str) -> tuple[str, str]:
@@ -291,6 +340,20 @@ def _build_parser() -> argparse.ArgumentParser:
       ),
   )
   eval_parser.add_argument(
+      '--pythonpath',
+      action='append',
+      type=_importable_dir,
+      default=[],
+      dest='pythonpath',
+      metavar='PATH',
+      help=(
+          'Extra directory to import custom metric functions from'
+          ' (`custom_metrics` in the eval config). Repeatable. The directory'
+          ' the command runs in is always importable; use this for metric'
+          ' modules that live elsewhere.'
+      ),
+  )
+  eval_parser.add_argument(
       '--keep-sessions',
       action='store_true',
       help="Don't delete remote sessions created for this run afterwards.",
@@ -322,8 +385,10 @@ def main(
       Process exit code: ``0`` if every eval metric passed, ``1`` if at least
       one metric failed, ``2`` on an execution error (bad ``AGENT_URL``,
       connection failure, ``--app-name`` resolution failure, evalset load
-      failure, no evalset discovered at all, duplicate ``eval_set_id``s, or
-      any eval case whose inference failed) or when no subcommand is given.
+      failure, no evalset discovered at all, duplicate ``eval_set_id``s, a
+      custom metric that cannot be resolved, a criteria metric with no
+      evaluator, or any eval case whose inference failed) or when no
+      subcommand is given.
   """
   parser = _build_parser()
   args = parser.parse_args(argv)
@@ -333,7 +398,11 @@ def main(
     return EXIT_ERROR
 
   assert args.command == 'eval'  # the only subcommand there is
-  return asyncio.run(_run_eval(args, transport=transport))
+  # Wrapped here rather than inside _run_eval so the eval config's custom
+  # metric modules are importable for the whole subcommand, including the
+  # scoring that happens after inference.
+  with _importable_from(args.pythonpath):
+    return asyncio.run(_run_eval(args, transport=transport))
 
 
 async def _run_eval(
@@ -548,6 +617,36 @@ async def _run_eval(
         )
         return EXIT_ERROR
 
+    # Metric registration and its validation run here, before any inference:
+    # an EvalMetric only carries a `custom_function_path`, and nothing teaches
+    # the registry that the metric exists, so an unregistered or unimportable
+    # custom metric would otherwise surface during scoring -- after the
+    # deployed agent's tools have already had their real-world side effects.
+    try:
+      check_custom_metrics_are_consistent([
+          (eval_set.eval_set_id, eval_config)
+          for eval_set, eval_config in eval_sets
+      ])
+      # One registry for the run, because one RemoteEvalService scores every
+      # evalset. The consistency check above is what makes that union
+      # faithful to each individual config.
+      metric_evaluator_registry = build_metric_evaluator_registry(
+          *(eval_config for _, eval_config in eval_sets)
+      )
+      for eval_set, eval_config in eval_sets:
+        check_criteria_have_evaluators(
+            metric_evaluator_registry,
+            eval_config,
+            eval_set_id=eval_set.eval_set_id,
+        )
+    except ValueError as e:
+      print(str(e), file=sys.stderr)
+      return EXIT_ERROR
+    # No ModuleNotFoundError branch: the registry lives in the very module
+    # RemoteEvalService's own guarded import above already pulled in, so if
+    # google-adk's eval dependency chain were incomplete this function would
+    # have returned with that message long before reaching here.
+
     eval_sets_manager = InMemoryEvalSetsManager()
     for eval_set, _ in eval_sets:
       eval_sets_manager.create_eval_set(
@@ -575,6 +674,7 @@ async def _run_eval(
         eval_sets_manager=eval_sets_manager,
         default_user_id=args.user_id,
         keep_sessions=args.keep_sessions,
+        metric_evaluator_registry=metric_evaluator_registry,
     )
 
     had_inference_failure = False

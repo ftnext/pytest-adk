@@ -1064,3 +1064,32 @@ async def test_distinct_pinned_sessions_are_not_flagged_by_the_service() -> None
       'sess-a',
       'sess-b',
   }
+
+
+@pytest.mark.parametrize('pass_registry', [True, False])
+def test_metric_evaluator_registry_is_forwarded_to_local_eval_service(
+    pass_registry,
+) -> None:
+  """Scoring reuses ``LocalEvalService.evaluate()``, which reads this attribute.
+
+  Custom metrics are only scorable when the registry that knows them is the
+  one ``evaluate()`` resolves metric names through; omitting the argument must
+  still leave ADK's process-wide default in place.
+  """
+  from google.adk.evaluation.metric_evaluator_registry import (
+      DEFAULT_METRIC_EVALUATOR_REGISTRY,
+  )
+  from google.adk.evaluation.metric_evaluator_registry import (
+      MetricEvaluatorRegistry,
+  )
+
+  registry = MetricEvaluatorRegistry()
+  service = RemoteEvalService(
+      _client_for(FakeApiServer()),
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=InMemoryEvalSetsManager(),
+      **({'metric_evaluator_registry': registry} if pass_registry else {}),
+  )
+
+  expected = registry if pass_registry else DEFAULT_METRIC_EVALUATOR_REGISTRY
+  assert service._metric_evaluator_registry is expected

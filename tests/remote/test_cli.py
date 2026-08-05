@@ -9,11 +9,13 @@ injected via ``main()``'s private ``transport`` hook.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
+import pytest_adk.cli as cli_module
 from pytest_adk.cli import main
 
 from .fake_server import FakeApiServer
@@ -52,9 +54,10 @@ tool_uses = [ { name = "get_weather", args = { city = "Tokyo" } } ]
 '''
 
 
-def _write_evalset(tmp_path: Path) -> Path:
+def _write_evalset(tmp_path: Path, config_json: str = _TEST_CONFIG_JSON) -> Path:
   """Writes a minimal weather evalset + sibling test_config.json to tmp_path."""
-  (tmp_path / 'test_config.json').write_text(_TEST_CONFIG_JSON, encoding='utf-8')
+  tmp_path.mkdir(parents=True, exist_ok=True)
+  (tmp_path / 'test_config.json').write_text(config_json, encoding='utf-8')
   evalset_path = tmp_path / 'weather.test.toml'
   evalset_path.write_text(_WEATHER_EVAL_SET_TOML, encoding='utf-8')
   return evalset_path
@@ -1831,3 +1834,411 @@ def test_evalset_without_a_config_file_still_runs(tmp_path, capsys) -> None:
 
   assert exit_code == 0, capsys.readouterr().err
   assert len(_saved_result_files(results_dir)) == 1
+
+
+# --- Custom metrics (issue #11) ----------------------------------------------
+#
+# `get_eval_metrics_from_config()` puts a configured custom metric's function
+# path on the EvalMetric, but nothing registers an evaluator for it. These
+# exercise the registration the CLI now performs, and the up-front validation
+# that keeps a bad config from being discovered only after the deployed agent
+# has already run.
+
+
+def _custom_metric_config_json(
+    function_path: str, *, metric_name: str = 'quality', **custom_metric_extra
+) -> str:
+  """A test_config.json pairing one built-in metric with one custom metric."""
+  return json.dumps({
+      'criteria': {'tool_trajectory_avg_score': 1.0, metric_name: 0.5},
+      'custom_metrics': {
+          metric_name: {
+              'code_config': {'name': function_path},
+              **custom_metric_extra,
+          }
+      },
+  })
+
+
+def _run_custom_metric_eval(
+    evalset_path: Path,
+    results_dir: Path,
+    server: FakeApiServer,
+    *extra_args: str,
+) -> int:
+  return main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+          *extra_args,
+      ],
+      transport=_transport_for(server),
+  )
+
+
+def test_sync_custom_metric_scores_the_run_without_programmatic_setup(
+    tmp_path, capsys, write_metric_module
+) -> None:
+  """The acceptance criterion: config alone is enough to run a custom metric."""
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(f'{module_name}.sync_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = _run_custom_metric_eval(
+      evalset_path,
+      results_dir,
+      server,
+      '--pythonpath',
+      str(metric_dir),
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  out = capsys.readouterr().out
+  assert 'quality: score=0.75' in out
+  # The built-in metric in the same criteria still uses its own evaluator.
+  assert 'tool_trajectory_avg_score: score=1.0' in out
+  assert len(_saved_result_files(results_dir)) == 1
+
+
+def test_async_custom_metric_is_awaited_and_can_fail_the_run(
+    tmp_path, capsys, write_metric_module
+) -> None:
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(f'{module_name}.async_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = _run_custom_metric_eval(
+      evalset_path, results_dir, server, '--pythonpath', str(metric_dir)
+  )
+
+  # 0.25 against a 0.5 threshold: the metric ran, and failed on its own terms.
+  assert exit_code == 1
+  err = capsys.readouterr().err
+  assert 'quality: score=0.25' in err
+  # A metric failure is still a verdict, so the results are saved.
+  assert len(_saved_result_files(results_dir)) == 1
+
+
+def test_custom_metric_module_is_found_in_the_working_directory(
+    tmp_path, capsys, monkeypatch, write_metric_module
+) -> None:
+  """A console script does not put the invocation directory on sys.path.
+
+  ``pytest-adk eval`` adds it, so a metric module sitting in the project the
+  user runs the command from is importable without any extra flag.
+  """
+  project_dir = tmp_path / 'project'
+  module_name = write_metric_module(project_dir)
+  evalset_path = _write_evalset(
+      project_dir / 'evals',
+      _custom_metric_config_json(f'{module_name}.sync_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+  monkeypatch.chdir(project_dir)
+
+  exit_code = _run_custom_metric_eval(evalset_path, results_dir, server)
+
+  assert exit_code == 0, capsys.readouterr().err
+
+
+def test_sys_path_is_restored_after_the_command(
+    tmp_path, monkeypatch, write_metric_module
+) -> None:
+  """main() is importable as a library function, so it must not leak sys.path."""
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(f'{module_name}.sync_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  monkeypatch.chdir(tmp_path)
+  before = list(sys.path)
+
+  _run_custom_metric_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--pythonpath',
+      str(metric_dir),
+  )
+
+  assert sys.path == before
+
+
+def test_configured_metric_info_reaches_the_registry(
+    tmp_path, capsys, monkeypatch, write_metric_module
+) -> None:
+  """A custom score range outside [0, 1] must not be replaced by the default."""
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(
+          f'{module_name}.sync_metric',
+          metric_info={
+              'metric_name': 'quality',
+              'description': 'Bounded at ten.',
+              'metric_value_info': {
+                  'interval': {'min_value': -10.0, 'max_value': 10.0}
+              },
+          },
+      ),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+
+  # The registry the CLI hands to RemoteEvalService is not otherwise
+  # observable from the outside -- MetricInfo does not appear in the printed
+  # results or the saved file -- so capture the object the command actually
+  # scores with rather than inferring it from ADK's process-wide default.
+  built_registries = []
+  real_build = cli_module.build_metric_evaluator_registry
+
+  def spy(*eval_configs):
+    registry = real_build(*eval_configs)
+    built_registries.append(registry)
+    return registry
+
+  monkeypatch.setattr(cli_module, 'build_metric_evaluator_registry', spy)
+
+  exit_code = _run_custom_metric_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--pythonpath',
+      str(metric_dir),
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert 'quality: score=0.75' in capsys.readouterr().out
+  assert len(built_registries) == 1
+  registered = {
+      metric_info.metric_name: metric_info
+      for metric_info in built_registries[0].get_registered_metrics()
+  }
+  assert registered['quality'].description == 'Bounded at ten.'
+  assert registered['quality'].metric_value_info.interval.max_value == 10.0
+
+
+@pytest.mark.parametrize(
+    'function_path_suffix, expected_fragment',
+    [
+        ('.does_not_exist', 'has no attribute'),
+        ('.not_a_function', 'is not callable'),
+    ],
+)
+def test_unresolvable_custom_metric_exits_two_before_inference(
+    tmp_path,
+    capsys,
+    write_metric_module,
+    function_path_suffix,
+    expected_fragment,
+) -> None:
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(module_name + function_path_suffix),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = _run_custom_metric_eval(
+      evalset_path, results_dir, server, '--pythonpath', str(metric_dir)
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'quality' in err
+  assert expected_fragment in err
+  # The point of validating up front: the deployed agent was never contacted,
+  # so none of its tools had a side effect.
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_unimportable_custom_metric_module_exits_two_before_inference(
+    tmp_path, capsys
+) -> None:
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json('no_such_module_for_pytest_adk.metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = _run_custom_metric_eval(evalset_path, results_dir, server)
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'no_such_module_for_pytest_adk' in err
+  assert '--pythonpath' in err
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_criteria_metric_without_an_evaluator_exits_two_before_inference(
+    tmp_path, capsys
+) -> None:
+  """A criteria name that is neither built-in nor declared as custom."""
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      json.dumps({'criteria': {'mystery_metric': 0.5}}),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = _run_custom_metric_eval(evalset_path, results_dir, server)
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'mystery_metric' in err
+  assert 'weather_set' in err
+  assert server.run_requests == []
+  assert not results_dir.exists()
+
+
+def test_two_evalsets_defining_one_metric_differently_exit_two(
+    tmp_path, capsys, write_metric_module
+) -> None:
+  """One run shares one registry, so the two definitions cannot both apply."""
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+
+  first_dir = tmp_path / 'first'
+  _write_evalset(
+      first_dir, _custom_metric_config_json(f'{module_name}.sync_metric')
+  )
+  second_dir = tmp_path / 'second'
+  _write_evalset(
+      second_dir, _custom_metric_config_json(f'{module_name}.async_metric')
+  )
+  # Distinct eval_set_ids, so this is rejected for the metric conflict rather
+  # than by the duplicate-eval_set_id guard.
+  (second_dir / 'weather.test.toml').write_text(
+      _WEATHER_EVAL_SET_TOML.replace('weather_set', 'weather_set_two'),
+      encoding='utf-8',
+  )
+
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(first_dir),
+          str(second_dir),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+          '--pythonpath',
+          str(metric_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 2
+  err = capsys.readouterr().err
+  assert 'quality' in err
+  assert 'weather_set' in err and 'weather_set_two' in err
+  assert server.run_requests == []
+
+
+def test_two_evalsets_sharing_one_custom_metric_definition_run(
+    tmp_path, capsys, write_metric_module
+) -> None:
+  """The inverse guard: identical definitions are not a conflict."""
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  config_json = _custom_metric_config_json(f'{module_name}.sync_metric')
+
+  first_dir = tmp_path / 'first'
+  _write_evalset(first_dir, config_json)
+  second_dir = tmp_path / 'second'
+  _write_evalset(second_dir, config_json)
+  (second_dir / 'weather.test.toml').write_text(
+      _WEATHER_EVAL_SET_TOML.replace('weather_set', 'weather_set_two'),
+      encoding='utf-8',
+  )
+
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(first_dir),
+          str(second_dir),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--num-runs',
+          '1',
+          '--pythonpath',
+          str(metric_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert len(_saved_result_files(results_dir)) == 2
+
+
+def test_nonexistent_pythonpath_is_an_argparse_error(tmp_path, capsys) -> None:
+  evalset_path = _write_evalset(tmp_path / 'evals')
+
+  with pytest.raises(SystemExit) as excinfo:
+    main([
+        'eval',
+        _AGENT_URL,
+        str(evalset_path),
+        '--app-name',
+        _APP_NAME,
+        '--pythonpath',
+        str(tmp_path / 'missing'),
+    ])
+
+  assert excinfo.value.code == 2
+  assert '--pythonpath' in capsys.readouterr().err

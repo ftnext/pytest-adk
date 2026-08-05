@@ -51,7 +51,9 @@ def _eval_case_result(eval_id: str, run_index: int = 0) -> EvalCaseResult:
 
 
 def _patch_successful_adk_eval(monkeypatch, *, seen_test_files=None) -> None:
-  config = SimpleNamespace(user_simulator_config=None)
+  # `custom_metrics=None` mirrors EvalConfig's own default: _AgentEvaluator
+  # reads it to decide whether the metric registry needs teaching.
+  config = SimpleNamespace(user_simulator_config=None, custom_metrics=None)
   agent_for_eval = object()
   eval_metrics = [object()]
 
@@ -468,3 +470,90 @@ def test_collect_eval_sets_directory_recursive(tmp_path, monkeypatch) -> None:
 
   assert set(seen_test_files) == {str(root_test), str(nested_test)}
   assert len(eval_sets) == 2
+
+
+# --- Custom metrics on the fixture path (issue #11) --------------------------
+#
+# ADK's ``AgentEvaluator`` builds its ``LocalEvalService`` without a
+# ``metric_evaluator_registry``, so unlike ``pytest-adk eval`` this path can
+# only register into ADK's process-wide default registry. (That registry is
+# snapshotted and restored per test; see tests/conftest.py.)
+
+
+def _custom_metric_config(function_path: str) -> object:
+  from google.adk.evaluation.eval_config import EvalConfig
+
+  return EvalConfig.model_validate({
+      'criteria': {'quality': 0.5},
+      'custom_metrics': {'quality': {'code_config': {'name': function_path}}},
+  })
+
+
+def _use_config(monkeypatch, eval_config) -> None:
+  monkeypatch.setattr(
+      evaluation_module._AdkAgentEvaluator,
+      'find_config_for_test_file',
+      staticmethod(lambda test_file: eval_config),
+  )
+
+
+@pytest.mark.asyncio
+async def test_fixture_path_registers_config_custom_metrics(
+    AgentEvaluator, tmp_path, monkeypatch, write_metric_module
+) -> None:
+  from google.adk.evaluation.metric_evaluator_registry import (
+      DEFAULT_METRIC_EVALUATOR_REGISTRY,
+  )
+
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  test_file = tmp_path / 'custom.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  _use_config(monkeypatch, _custom_metric_config(f'{module_name}.sync_metric'))
+
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=test_file,
+      num_runs=1,
+  )
+
+  registered = {
+      metric_info.metric_name
+      for metric_info in DEFAULT_METRIC_EVALUATOR_REGISTRY.get_registered_metrics()
+  }
+  assert 'quality' in registered
+
+
+@pytest.mark.asyncio
+async def test_fixture_path_rejects_an_unresolvable_custom_metric(
+    AgentEvaluator, tmp_path, monkeypatch
+) -> None:
+  """The agent must not even be loaded when the config cannot work."""
+  test_file = tmp_path / 'custom.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  _use_config(
+      monkeypatch,
+      _custom_metric_config('no_such_module_for_pytest_adk.metric'),
+  )
+  loaded_agents = []
+
+  async def get_agent_for_eval(module_name, agent_name=None):
+    loaded_agents.append(module_name)
+    return object()
+
+  monkeypatch.setattr(
+      evaluation_module._AdkAgentEvaluator,
+      '_get_agent_for_eval',
+      staticmethod(get_agent_for_eval),
+  )
+
+  with pytest.raises(ValueError, match='quality'):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+    )
+
+  assert loaded_agents == []
