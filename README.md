@@ -365,4 +365,9 @@ command prints a clear error instead of a traceback.
   of being independent repetitions. The combination is rejected with exit 2 —
   pass `--num-runs 1`, or drop `session_id` so each run gets a fresh session.
 - Sessions created for the run are deleted afterwards unless you pass
-  `--keep-sessions`.
+  `--keep-sessions`. Each one asks the server for an ADK-style
+  `___eval___session___…` id, the same convention ADK's own eval flow uses, so
+  a session that outlives the run stays hidden from the api_server's session
+  listing. A deployment whose session service assigns ids in its own format
+  and rejects the requested one is retried automatically without it, and the
+  server-assigned id is used from then on.
