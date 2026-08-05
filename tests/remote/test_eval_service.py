@@ -371,12 +371,15 @@ async def test_multi_turn_eval_case_scores_as_expected_and_cleans_up_session() -
   assert scores['tool_trajectory_avg_score'] == pytest.approx(1.0)
   assert scores['response_match_score'] == pytest.approx(1.0)
 
-  # Initial session state from session_input was POSTed to the fake server.
+  # Initial session state from session_input was POSTed to the fake server,
+  # along with an ADK-style eval session id (which an api_server hides from
+  # its session listing) -- accepted here, so no second attempt was made.
   assert len(server.create_session_requests) == 1
   create_request = server.create_session_requests[0]
   assert create_request['app_name'] == _REMOTE_APP_NAME
   assert create_request['user_id'] == 'alice'
   assert create_request['body']['state'] == {'locale': 'en-US'}
+  assert create_request['body']['sessionId'].startswith('___eval___session___')
 
   # Multi-turn conversation accumulated events across turns: both /run calls
   # used the server-assigned session id, not the (never sent back) requested
@@ -415,6 +418,145 @@ async def test_keep_sessions_true_does_not_delete_created_session() -> None:
   assert inference_results[0].status == InferenceStatus.SUCCESS
   assert server.create_session_requests  # a session WAS created
   assert server.deleted_session_ids == []  # but not deleted
+
+
+async def test_rejected_client_session_id_falls_back_to_a_server_assigned_one() -> (
+    None
+):
+  """A session service that assigns ids itself must not break the eval.
+
+  Such a deployment rejects a create request carrying a ``sessionId`` while
+  accepting the very same request without one (issue #10). The requested
+  ADK-style id is a nicety -- an api_server hides sessions named that way
+  from its session listing -- so being refused it costs one round trip and
+  nothing else.
+  """
+  server = FakeApiServer()
+  server.reject_client_session_ids = True
+  server.scripts['carol'] = _weather_script()
+  client = _client_for(server)
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=InMemoryEvalSetsManager(),
+  )
+  eval_set = EvalSet(
+      eval_set_id='weather_set',
+      eval_cases=[_weather_eval_case('weather_case', 'carol')],
+  )
+
+  try:
+    inference_results, eval_case_results = await _run_full_eval(
+        service, eval_set, _METRICS
+    )
+  finally:
+    await client.aclose()
+
+  # The eval ran to completion and scored, against a server that refused the
+  # requested id outright.
+  assert len(inference_results) == 1
+  inference_result = inference_results[0]
+  assert inference_result.status == InferenceStatus.SUCCESS
+  assert eval_case_results[0].final_eval_status == EvalStatus.PASSED
+
+  # Two create attempts: the rejected one asked for an id, the retry did not.
+  assert len(server.create_session_requests) == 2
+  rejected_body, retried_body = (
+      request['body'] for request in server.create_session_requests
+  )
+  assert rejected_body['sessionId'].startswith('___eval___session___')
+  assert 'sessionId' not in retried_body
+  # session_input.state is forwarded on both attempts, so the session the
+  # server did create still starts from the declared state.
+  assert rejected_body['state'] == {'locale': 'en-US'}
+  assert retried_body['state'] == {'locale': 'en-US'}
+
+  # The server-assigned id is what /run and the cleanup DELETE used.
+  assert [request['sessionId'] for request in server.run_requests] == [
+      'srv-session-1',
+      'srv-session-1',
+  ]
+  assert inference_result.session_id == 'srv-session-1'
+  assert server.deleted_session_ids == ['srv-session-1']
+
+
+async def test_rejected_client_session_id_is_not_requested_again() -> None:
+  """Once refused, later eval cases skip the doomed first attempt.
+
+  Otherwise every eval case of every ``--num-runs`` repetition would spend a
+  rejected request before creating its session. Two sequential
+  ``perform_inference()`` calls on one service stand in for that, so the
+  ordering does not depend on ``parallelism``.
+  """
+  server = FakeApiServer()
+  server.reject_client_session_ids = True
+  server.scripts['dave'] = _weather_script()
+  server.scripts['erin'] = _weather_script()
+  client = _client_for(server)
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=InMemoryEvalSetsManager(),
+  )
+
+  try:
+    first_results = await _register_and_perform_inference(
+        service,
+        EvalSet(
+            eval_set_id='first_set',
+            eval_cases=[_weather_eval_case('first_case', 'dave')],
+        ),
+    )
+    creates_after_first = len(server.create_session_requests)
+    second_results = await _register_and_perform_inference(
+        service,
+        EvalSet(
+            eval_set_id='second_set',
+            eval_cases=[_weather_eval_case('second_case', 'erin')],
+        ),
+    )
+  finally:
+    await client.aclose()
+
+  assert first_results[0].status == InferenceStatus.SUCCESS
+  assert second_results[0].status == InferenceStatus.SUCCESS
+  assert creates_after_first == 2  # rejected attempt + retry
+  later_bodies = [
+      request['body']
+      for request in server.create_session_requests[creates_after_first:]
+  ]
+  assert len(later_bodies) == 1  # no second rejected attempt
+  assert 'sessionId' not in later_bodies[0]
+
+
+async def test_create_session_server_error_is_not_retried() -> None:
+  """A 5xx means the server is broken, not that it dislikes the id."""
+  server = FakeApiServer()
+  server.fail_create_session_with_status = 500
+  server.scripts['frank'] = _weather_script()
+  client = _client_for(server)
+  service = RemoteEvalService(
+      client,
+      app_name=_REMOTE_APP_NAME,
+      eval_sets_manager=InMemoryEvalSetsManager(),
+  )
+  eval_set = EvalSet(
+      eval_set_id='weather_set',
+      eval_cases=[_weather_eval_case('weather_case', 'frank')],
+  )
+
+  try:
+    inference_results = await _register_and_perform_inference(
+        service, eval_set
+    )
+  finally:
+    await client.aclose()
+
+  assert inference_results[0].status == InferenceStatus.FAILURE
+  assert '500' in inference_results[0].error_message
+  assert len(server.create_session_requests) == 1  # no retry
+  assert server.run_requests == []
+  assert server.deleted_session_ids == []  # nothing was created to delete
 
 
 async def test_existing_session_is_reused_and_never_created_or_deleted() -> (

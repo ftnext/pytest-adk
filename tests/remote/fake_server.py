@@ -57,6 +57,12 @@ class FakeApiServer:
   one the client requested, so tests can verify callers use the *returned*
   id (not the requested one) for subsequent ``/run`` and ``DELETE`` calls --
   matching how a real api_server may ignore the requested id.
+
+  Two flags make session creation fail: ``reject_client_session_ids`` models a
+  deployment whose session service assigns ids itself and refuses a
+  client-supplied ``sessionId`` with a 400 while accepting the same request
+  without one, and ``fail_create_session_with_status`` fails every create with
+  a given status regardless of the body.
   """
 
   def __init__(self, app_names: list[str] | None = None) -> None:
@@ -78,6 +84,10 @@ class FakeApiServer:
     self.scripts: dict[str, list[list[dict[str, Any]]]] = {}
     self.fail_user_ids: set[str] = set()
     self.fail_run_with_status: int | None = None
+    # Reject any create-session request that carries a ``sessionId``, the way
+    # a session service that assigns ids in its own format does.
+    self.reject_client_session_ids = False
+    self.fail_create_session_with_status: int | None = None
     # Headers of every request received, in arrival order (lower-cased keys,
     # matching httpx/Starlette's own normalization). Used by tests to verify
     # ``--header``/``headers=`` actually reach the server.
@@ -107,9 +117,22 @@ class FakeApiServer:
           [(k.decode(), v.decode()) for k, v in request.headers.raw]
       )
       body = await request.json()
+      # Recorded before any rejection below, so tests can assert on the
+      # request that was refused as well as on the one that succeeded.
       self.create_session_requests.append(
           {'app_name': app_name, 'user_id': user_id, 'body': body}
       )
+
+      if self.fail_create_session_with_status is not None:
+        return JSONResponse(
+            {'detail': 'boom'},
+            status_code=self.fail_create_session_with_status,
+        )
+      if self.reject_client_session_ids and 'sessionId' in body:
+        return JSONResponse(
+            {'detail': 'sessionId is assigned by the server'}, status_code=400
+        )
+
       self._next_session_num += 1
       # Deliberately NOT the client's requested sessionId (if any): see
       # class docstring.
