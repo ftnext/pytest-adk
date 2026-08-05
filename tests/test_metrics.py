@@ -23,7 +23,10 @@ from pytest_adk.metrics import build_metric_evaluator_registry
 from pytest_adk.metrics import check_criteria_have_evaluators
 from pytest_adk.metrics import check_custom_metrics_are_consistent
 from pytest_adk.metrics import custom_metric_info
+from pytest_adk.metrics import default_metric_evaluator_registry
 from pytest_adk.metrics import register_custom_metrics
+from pytest_adk.metrics import registered_custom_metrics
+from pytest_adk.metrics import restored_registry_contents
 
 
 def _config(criteria: dict, custom_metrics: dict | None = None) -> EvalConfig:
@@ -370,3 +373,175 @@ def test_register_custom_metrics_is_a_no_op_without_custom_metrics() -> None:
   register_custom_metrics(registry, _config({'response_match_score': 0.8}))
 
   assert _registered_names(registry) == before
+
+
+# --- Scoping registrations to one evaluation ---------------------------------
+
+
+def test_metric_evaluator_registry_still_exposes_its_backing_mapping() -> None:
+  """Guard on the one google-adk internal ``restored_registry_contents`` needs.
+
+  ADK has no public way to undo a registration, so the restore reaches for
+  ``MetricEvaluatorRegistry._registry``. If a future release renames or drops
+  it, fail here with an explanation rather than in the middle of somebody's
+  evaluation.
+  """
+  from google.adk.evaluation.metric_evaluator_registry import (
+      MetricEvaluatorRegistry,
+  )
+
+  registry = MetricEvaluatorRegistry()
+  assert isinstance(getattr(registry, '_registry', None), dict), (
+      'MetricEvaluatorRegistry no longer keeps its metric mapping in a'
+      ' `_registry` dict; pytest_adk.metrics.restored_registry_contents needs'
+      ' another way to snapshot and restore it.'
+  )
+
+
+def test_restored_registry_contents_undoes_a_registration(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = build_metric_evaluator_registry()
+  before = _registered_names(registry)
+
+  with restored_registry_contents(registry):
+    register_custom_metrics(
+        registry,
+        _config(
+            {'quality': 0.5},
+            {'quality': _custom(f'{module_name}.sync_metric')},
+        ),
+    )
+    assert 'quality' in _registered_names(registry)
+
+  assert _registered_names(registry) == before
+
+
+def test_restored_registry_contents_restores_a_shadowed_builtin(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  from google.adk.evaluation.custom_metric_evaluator import (
+      _CustomMetricEvaluator,
+  )
+  from google.adk.evaluation.response_evaluator import ResponseEvaluator
+
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = build_metric_evaluator_registry()
+
+  with restored_registry_contents(registry):
+    register_custom_metrics(
+        registry,
+        _config(
+            {'response_match_score': 0.5},
+            {
+                'response_match_score': _custom(
+                    f'{module_name}.sync_metric'
+                )
+            },
+        ),
+    )
+    assert registry._registry['response_match_score'][0] is (
+        _CustomMetricEvaluator
+    )
+
+  assert registry._registry['response_match_score'][0] is ResponseEvaluator
+
+
+def test_restored_registry_contents_restores_when_the_block_raises(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = build_metric_evaluator_registry()
+  before = _registered_names(registry)
+
+  with pytest.raises(RuntimeError):
+    with restored_registry_contents(registry):
+      register_custom_metrics(
+          registry,
+          _config(
+              {'quality': 0.5},
+              {'quality': _custom(f'{module_name}.sync_metric')},
+          ),
+      )
+      raise RuntimeError('scoring blew up')
+
+  assert _registered_names(registry) == before
+
+
+def test_restoration_is_visible_through_every_registry_instance(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  """ADK shares one mapping across instances, so the undo has to as well."""
+  from google.adk.evaluation.metric_evaluator_registry import (
+      MetricEvaluatorRegistry,
+  )
+
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = build_metric_evaluator_registry()
+
+  with restored_registry_contents(registry):
+    register_custom_metrics(
+        registry,
+        _config(
+            {'quality': 0.5},
+            {'quality': _custom(f'{module_name}.sync_metric')},
+        ),
+    )
+
+  assert 'quality' not in _registered_names(MetricEvaluatorRegistry())
+
+
+def test_registered_custom_metrics_scopes_the_registration(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = default_metric_evaluator_registry()
+
+  with registered_custom_metrics(
+      _config(
+          {'quality': 0.5}, {'quality': _custom(f'{module_name}.sync_metric')}
+      ),
+      eval_set_id='some_set',
+  ):
+    assert 'quality' in _registered_names(registry)
+
+  assert 'quality' not in _registered_names(registry)
+
+
+def test_registered_custom_metrics_without_custom_metrics_is_a_no_op() -> None:
+  registry = default_metric_evaluator_registry()
+  before = _registered_names(registry)
+
+  with registered_custom_metrics(
+      _config({'response_match_score': 0.8}), eval_set_id='some_set'
+  ):
+    assert _registered_names(registry) == before
+
+  assert _registered_names(registry) == before
+
+
+def test_registered_custom_metrics_leaves_nothing_behind_when_it_rejects(
+    write_metric_module, monkeypatch, tmp_path
+) -> None:
+  """The criteria check runs inside the scope, so its failure must undo too."""
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  registry = default_metric_evaluator_registry()
+  config = _config(
+      # 'mystery' has no evaluator, so check_criteria_have_evaluators rejects
+      # the config -- after 'quality' has already been registered.
+      {'quality': 0.5, 'mystery': 0.5},
+      {'quality': _custom(f'{module_name}.sync_metric')},
+  )
+
+  with pytest.raises(ValueError, match='mystery'):
+    with registered_custom_metrics(config, eval_set_id='some_set'):
+      raise AssertionError('the block must not run')
+
+  assert 'quality' not in _registered_names(registry)

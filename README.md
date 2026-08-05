@@ -358,7 +358,10 @@ conversation_scenario)` and returns an ADK `EvaluationResult`. Both plain and
 
 No programmatic registration is needed: pytest-adk registers each configured
 custom metric with ADK's metric registry before the run — on the
-`pytest-adk eval` path and on the `AgentEvaluator` fixture path alike. Supply
+`pytest-adk eval` path and on the `AgentEvaluator` fixture path alike. On the
+fixture path the registration is scoped to the evalset that asked for it and
+undone afterwards, so a custom metric in one test (even one named after a
+built-in metric) does not change how any other test is scored. Supply
 `metric_info` to describe a score range other than the default `[0.0, 1.0]`;
 its `metric_name` is always forced to the `custom_metrics` key, since that is
 what the registry is looked up by.
@@ -428,11 +431,14 @@ command prints a clear error instead of a traceback.
   listing. A deployment whose session service assigns ids in its own format
   and rejects the requested one is retried automatically without it, and the
   server-assigned id is used from then on.
-- ADK's metric registry is process-wide state. `pytest-adk eval` runs in its
-  own process and rejects configs that would collide (see
-  [Custom metrics](#custom-metrics)), but on the `AgentEvaluator` fixture path
-  the whole pytest session shares one registry — ADK's `AgentEvaluator` takes
-  no registry argument, so there is nothing else to register into. Each
-  evalset is registered immediately before it runs, so differing configs still
-  score with their own metric functions; two tests that give one metric name
-  two different meanings, however, are a conflict this path cannot detect.
+- ADK's metric registry is process-wide state, and ADK's `AgentEvaluator`
+  takes no registry argument, so the fixture path has nothing else to register
+  custom metrics into. pytest-adk scopes each registration to the one
+  evalset's evaluation and restores the previous mapping afterwards, which
+  makes *sequential* evaluations independent: two tests, or two evalsets in
+  one `evaluate()` call, are each scored with the metric their own config
+  names. Evaluations running **concurrently in one process** — e.g.
+  `asyncio.gather()` over two `AgentEvaluator.evaluate()` calls where the
+  configs disagree about a metric name — can still see each other's
+  registrations, and are not supported. (Running tests in parallel with
+  pytest-xdist is fine: those are separate processes.)

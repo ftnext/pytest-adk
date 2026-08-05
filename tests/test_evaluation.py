@@ -476,16 +476,21 @@ def test_collect_eval_sets_directory_recursive(tmp_path, monkeypatch) -> None:
 #
 # ADK's ``AgentEvaluator`` builds its ``LocalEvalService`` without a
 # ``metric_evaluator_registry``, so unlike ``pytest-adk eval`` this path can
-# only register into ADK's process-wide default registry. (That registry is
-# snapshotted and restored per test; see tests/conftest.py.)
+# only register into ADK's process-wide default registry. It therefore has to
+# put back what it found: these check both halves of that, and they assert
+# from inside the test body, before the conftest safety net's teardown runs.
 
 
-def _custom_metric_config(function_path: str) -> object:
+def _custom_metric_config(
+    function_path: str, *, metric_name: str = 'quality'
+) -> object:
   from google.adk.evaluation.eval_config import EvalConfig
 
   return EvalConfig.model_validate({
-      'criteria': {'quality': 0.5},
-      'custom_metrics': {'quality': {'code_config': {'name': function_path}}},
+      'criteria': {metric_name: 0.5},
+      'custom_metrics': {
+          metric_name: {'code_config': {'name': function_path}}
+      },
   })
 
 
@@ -497,12 +502,44 @@ def _use_config(monkeypatch, eval_config) -> None:
   )
 
 
+def _registered_evaluator(metric_name: str):
+  """Returns the evaluator class ADK would resolve ``metric_name`` to now."""
+  from google.adk.evaluation.metric_evaluator_registry import (
+      DEFAULT_METRIC_EVALUATOR_REGISTRY,
+  )
+
+  entry = DEFAULT_METRIC_EVALUATOR_REGISTRY._registry.get(metric_name)
+  return entry[0] if entry is not None else None
+
+
+def _capture_evaluator_during_scoring(monkeypatch, metric_name: str) -> list:
+  """Records what ``metric_name`` resolves to while ADK is scoring.
+
+  Patched over the stub ``_patch_successful_adk_eval`` installs, because
+  ``_get_eval_results_by_eval_id`` is exactly where a real
+  ``LocalEvalService`` consults the registry -- so this observes the mapping
+  at the only moment it has to be the custom one.
+  """
+  seen: list = []
+
+  async def get_eval_results_by_eval_id(**kwargs):
+    seen.append(_registered_evaluator(metric_name))
+    return {'case-1': [_eval_case_result('case-1', 0)]}
+
+  monkeypatch.setattr(
+      evaluation_module._AdkAgentEvaluator,
+      '_get_eval_results_by_eval_id',
+      staticmethod(get_eval_results_by_eval_id),
+  )
+  return seen
+
+
 @pytest.mark.asyncio
 async def test_fixture_path_registers_config_custom_metrics(
     AgentEvaluator, tmp_path, monkeypatch, write_metric_module
 ) -> None:
-  from google.adk.evaluation.metric_evaluator_registry import (
-      DEFAULT_METRIC_EVALUATOR_REGISTRY,
+  from google.adk.evaluation.custom_metric_evaluator import (
+      _CustomMetricEvaluator,
   )
 
   module_name = write_metric_module()
@@ -511,6 +548,7 @@ async def test_fixture_path_registers_config_custom_metrics(
   test_file.write_text('{}', encoding='utf-8')
   _patch_successful_adk_eval(monkeypatch)
   _use_config(monkeypatch, _custom_metric_config(f'{module_name}.sync_metric'))
+  scored_with = _capture_evaluator_during_scoring(monkeypatch, 'quality')
 
   await AgentEvaluator.evaluate(
       agent_module='fake_agent',
@@ -518,11 +556,134 @@ async def test_fixture_path_registers_config_custom_metrics(
       num_runs=1,
   )
 
-  registered = {
-      metric_info.metric_name
-      for metric_info in DEFAULT_METRIC_EVALUATOR_REGISTRY.get_registered_metrics()
-  }
-  assert 'quality' in registered
+  assert scored_with == [_CustomMetricEvaluator]
+  # ...and the process-wide registry is handed back the way it was found.
+  assert _registered_evaluator('quality') is None
+
+
+@pytest.mark.asyncio
+async def test_fixture_path_restores_a_shadowed_builtin_evaluator(
+    AgentEvaluator, tmp_path, monkeypatch, write_metric_module
+) -> None:
+  """The leak from the review: a custom metric named after a built-in one.
+
+  Registering ``response_match_score`` as a custom metric used to leave the
+  custom evaluator in ADK's process-wide registry, so every *later* test in
+  the same pytest session that used the plain built-in metric was scored with
+  this test's function instead.
+  """
+  from google.adk.evaluation.custom_metric_evaluator import (
+      _CustomMetricEvaluator,
+  )
+  from google.adk.evaluation.response_evaluator import ResponseEvaluator
+
+  builtin_before = _registered_evaluator('response_match_score')
+  assert builtin_before is ResponseEvaluator  # guards the premise
+
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  test_file = tmp_path / 'shadowing.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  _use_config(
+      monkeypatch,
+      _custom_metric_config(
+          f'{module_name}.sync_metric', metric_name='response_match_score'
+      ),
+  )
+  scored_with = _capture_evaluator_during_scoring(
+      monkeypatch, 'response_match_score'
+  )
+
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=test_file,
+      num_runs=1,
+  )
+
+  # The evalset that asked for the override got it...
+  assert scored_with == [_CustomMetricEvaluator]
+  # ...and nothing after it does.
+  assert _registered_evaluator('response_match_score') is ResponseEvaluator
+
+
+@pytest.mark.asyncio
+async def test_a_later_fixture_eval_uses_the_builtin_evaluator(
+    AgentEvaluator, tmp_path, monkeypatch, write_metric_module
+) -> None:
+  """Two sequential evaluations, standing in for two tests in one session."""
+  from google.adk.evaluation.custom_metric_evaluator import (
+      _CustomMetricEvaluator,
+  )
+  from google.adk.evaluation.response_evaluator import ResponseEvaluator
+
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  test_file = tmp_path / 'shadowing.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  scored_with = _capture_evaluator_during_scoring(
+      monkeypatch, 'response_match_score'
+  )
+
+  _use_config(
+      monkeypatch,
+      _custom_metric_config(
+          f'{module_name}.sync_metric', metric_name='response_match_score'
+      ),
+  )
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=test_file,
+      num_runs=1,
+  )
+
+  # A second evalset, whose config names the metric with no custom_metrics
+  # entry: it means ADK's built-in, and must be scored with it.
+  from google.adk.evaluation.eval_config import EvalConfig
+
+  _use_config(
+      monkeypatch,
+      EvalConfig.model_validate({'criteria': {'response_match_score': 0.8}}),
+  )
+  await AgentEvaluator.evaluate(
+      agent_module='fake_agent',
+      eval_dataset_file_path_or_dir=test_file,
+      num_runs=1,
+  )
+
+  assert scored_with == [_CustomMetricEvaluator, ResponseEvaluator]
+
+
+@pytest.mark.asyncio
+async def test_fixture_path_restores_the_registry_when_metrics_fail(
+    AgentEvaluator, tmp_path, monkeypatch, write_metric_module
+) -> None:
+  """A failing evalset must not be the one that leaks its metrics."""
+  module_name = write_metric_module()
+  monkeypatch.syspath_prepend(str(tmp_path))
+  test_file = tmp_path / 'failing.test.json'
+  test_file.write_text('{}', encoding='utf-8')
+  _patch_successful_adk_eval(monkeypatch)
+  _use_config(monkeypatch, _custom_metric_config(f'{module_name}.sync_metric'))
+  monkeypatch.setattr(
+      evaluation_module._AdkAgentEvaluator,
+      '_process_metrics_and_get_failures',
+      staticmethod(
+          lambda eval_metric_results, print_detailed_results, agent_module: [
+              'quality for None Failed. Expected 0.5, but got 0.0.'
+          ]
+      ),
+  )
+
+  with pytest.raises(AssertionError, match='Following are all the test'):
+    await AgentEvaluator.evaluate(
+        agent_module='fake_agent',
+        eval_dataset_file_path_or_dir=test_file,
+        num_runs=1,
+    )
+
+  assert _registered_evaluator('quality') is None
 
 
 @pytest.mark.asyncio
