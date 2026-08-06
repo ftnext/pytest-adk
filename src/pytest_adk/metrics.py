@@ -27,9 +27,11 @@ costs nothing extra. The other google-adk imports below were verified
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 from typing import Any
 from typing import Callable
+from typing import Iterator
 from typing import Sequence
 from typing import TYPE_CHECKING
 
@@ -103,6 +105,90 @@ def default_metric_evaluator_registry() -> MetricEvaluatorRegistry:
   except ModuleNotFoundError as e:
     raise ModuleNotFoundError(_MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
   return DEFAULT_METRIC_EVALUATOR_REGISTRY
+
+
+@contextlib.contextmanager
+def restored_registry_contents(
+    registry: MetricEvaluatorRegistry,
+) -> Iterator[None]:
+  """Undoes any registration made on ``registry`` inside the block.
+
+  ``MetricEvaluatorRegistry`` keeps its ``metric name -> (evaluator,
+  MetricInfo)`` mapping in a ``_registry`` attribute that is *class*-level
+  (verified in google-adk 1.30.0 through 2.6.1), so every instance -- the
+  process-wide ``DEFAULT_METRIC_EVALUATOR_REGISTRY`` included -- shares one
+  dict: a registration made anywhere is visible everywhere, for the rest of
+  the process.
+
+  That is fine for ``pytest-adk eval``, which owns its process, but not for
+  the ``AgentEvaluator`` fixture, where one test's custom metric would
+  otherwise still be scoring metrics of that name in every later test of the
+  same pytest session.
+
+  ADK offers no public way to undo a registration:
+  ``register_evaluator()`` only ever adds or overwrites, and the read-only
+  ``get_registered_metrics()`` returns ``MetricInfo`` without the evaluator
+  classes, so it cannot rebuild the mapping. Reaching for the private
+  attribute is the only thing that can, and a guard test in
+  ``tests/test_metrics.py`` fails loudly if a future google-adk stops
+  providing it.
+
+  The dict is cleared and refilled in place rather than reassigned, so the
+  instances aliasing it (again: all of them) see the restoration too.
+  """
+  contents = registry._registry
+  snapshot = dict(contents)
+  try:
+    yield
+  finally:
+    contents.clear()
+    contents.update(snapshot)
+
+
+@contextlib.contextmanager
+def registered_custom_metrics(
+    eval_config: EvalConfig, *, eval_set_id: str
+) -> Iterator[None]:
+  """Makes ``eval_config``'s custom metrics scorable inside the block only.
+
+  For callers that cannot hand a registry of their own to
+  ``LocalEvalService`` and so have to teach ADK's process-wide default one
+  (:func:`default_metric_evaluator_registry`). The registrations are undone on
+  exit -- including when the block raises, since a failed evaluation is
+  exactly when a leaked metric would go unnoticed.
+
+  The whole evaluation belongs inside the block, not just the call that starts
+  it: the registry is consulted while *scoring*, so restoring any earlier
+  would put the built-in evaluators back before the custom metric has been
+  used.
+
+  Args:
+      eval_config: Config whose ``custom_metrics`` should be registered.
+      eval_set_id: Used only to name the evalset in error messages.
+
+  Raises:
+      ValueError: If a configured custom metric cannot be resolved, or if a
+          metric named in ``criteria`` has no evaluator. Raised before the
+          block runs, and with nothing left registered.
+  """
+  if not eval_config.custom_metrics:
+    # Nothing to register. The criteria check goes with it: it can only report
+    # what the registry knows, and without custom metrics that is exactly
+    # ADK's own built-in set -- so a misspelled built-in still fails where it
+    # always did rather than gaining a second, differently worded failure
+    # path here. Returning before touching the registry also keeps the
+    # google-adk eval dependency chain (see the module docstring) out of the
+    # overwhelmingly common no-custom-metrics case.
+    yield
+    return
+
+  registry = default_metric_evaluator_registry()
+  with restored_registry_contents(registry):
+    register_custom_metrics(registry, eval_config)
+    check_criteria_have_evaluators(
+        registry, eval_config, eval_set_id=eval_set_id
+    )
+    yield
 
 
 def build_metric_evaluator_registry(

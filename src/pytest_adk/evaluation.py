@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
+from typing import Iterator
 
 try:
   import tomllib  # Python 3.11+
@@ -154,50 +156,40 @@ def _collect_eval_sets(
   return eval_sets
 
 
-def _register_custom_metrics_for_config(
+@contextlib.contextmanager
+def _registered_custom_metrics(
     eval_config: EvalConfig, eval_set_id: str
-) -> None:
-  """Teaches ADK's default metric registry about this config's custom metrics.
+) -> Iterator[None]:
+  """Scopes this config's custom metrics to one evalset's evaluation.
 
   ``AgentEvaluator._get_eval_results_by_eval_id`` builds its
   ``LocalEvalService`` without a ``metric_evaluator_registry``, so unlike
   ``pytest-adk eval`` -- which passes its own -- this path can only reach
-  ADK's process-wide default registry, which is the object ADK's own
-  ``adk eval`` command registers into too.
+  ADK's process-wide default registry, the object ADK's own ``adk eval``
+  command registers into too.
 
-  Called per evalset, immediately before that evalset runs, so a run whose
-  evalsets carry different configs still scores each one with its own metric
-  functions. The registry is nevertheless process-wide state: two evalsets
-  that give one metric name two different meanings within a single pytest
-  session are a genuine conflict, which ``pytest-adk eval`` rejects outright
-  and this path cannot detect (see README).
+  Entered and exited per evalset, which is what keeps that shared registry
+  from turning one test's metrics into every later test's. Within the block
+  the evalset's own custom metrics win (including over a built-in of the same
+  name); on the way out the previous mapping comes back, so evalsets that
+  disagree about a metric name -- across two tests, or across two evalsets in
+  one ``evaluate()`` call -- are each still scored with the definition their
+  own config names.
 
   The import is deferred rather than made at module scope because this module
   is loaded by the pytest plugin at interpreter start-up, for every pytest run
-  in the environment. :mod:`pytest_adk.metrics` is importable on its own, but
-  the registry it reaches for needs google-adk's eval dependency chain (see
-  that module's docstring), and only a config that declares custom metrics has
-  any reason to pay for it.
+  in the environment; :mod:`pytest_adk.metrics` in turn only reaches for
+  google-adk's eval dependency chain (see its module docstring) when a config
+  actually declares custom metrics.
 
   Raises:
       ValueError: If a configured custom metric cannot be resolved, or if a
           metric named in ``criteria`` has no evaluator.
   """
-  if not eval_config.custom_metrics:
-    # Nothing to register. The criteria check goes with it: it can only report
-    # what the registry knows, and without custom metrics that is exactly
-    # ADK's own built-in set -- so a misspelled built-in still fails where it
-    # always did rather than gaining a second, differently worded failure path
-    # on this side.
-    return
+  from .metrics import registered_custom_metrics
 
-  from .metrics import check_criteria_have_evaluators
-  from .metrics import default_metric_evaluator_registry
-  from .metrics import register_custom_metrics
-
-  registry = default_metric_evaluator_registry()
-  register_custom_metrics(registry, eval_config)
-  check_criteria_have_evaluators(registry, eval_config, eval_set_id=eval_set_id)
+  with registered_custom_metrics(eval_config, eval_set_id=eval_set_id):
+    yield
 
 
 class _AgentEvaluator:
@@ -321,62 +313,70 @@ class _AgentEvaluator:
       agent_name: str | None,
       print_detailed_results: bool,
   ) -> None:
-    """Run ADK evaluation for one ``EvalSet``, persist it, then assert metrics."""
-    _register_custom_metrics_for_config(eval_config, eval_set.eval_set_id)
+    """Run ADK evaluation for one ``EvalSet``, persist it, then assert metrics.
 
-    agent_for_eval = await _AdkAgentEvaluator._get_agent_for_eval(
-        module_name=agent_module, agent_name=agent_name
-    )
-    eval_metrics = get_eval_metrics_from_config(eval_config)
-    user_simulator_provider = UserSimulatorProvider(
-        user_simulator_config=eval_config.user_simulator_config
-    )
+    The whole body runs inside :func:`_registered_custom_metrics`, whose scope
+    ends only once this evalset is completely done with: ADK consults the
+    metric registry while *scoring*, inside
+    ``_get_eval_results_by_eval_id()``, and the reporting below reads the
+    results that scoring produced. Leaving on the assertion path matters as
+    much as leaving on the happy one -- a failing evalset must not be the one
+    that leaks its metrics into the rest of the session.
+    """
+    with _registered_custom_metrics(eval_config, eval_set.eval_set_id):
+      agent_for_eval = await _AdkAgentEvaluator._get_agent_for_eval(
+          module_name=agent_module, agent_name=agent_name
+      )
+      eval_metrics = get_eval_metrics_from_config(eval_config)
+      user_simulator_provider = UserSimulatorProvider(
+          user_simulator_config=eval_config.user_simulator_config
+      )
 
-    eval_results_by_eval_id = (
-        await _AdkAgentEvaluator._get_eval_results_by_eval_id(
-            agent_for_eval=agent_for_eval,
-            eval_set=eval_set,
-            eval_metrics=eval_metrics,
-            num_runs=num_runs,
-            user_simulator_provider=user_simulator_provider,
+      eval_results_by_eval_id = (
+          await _AdkAgentEvaluator._get_eval_results_by_eval_id(
+              agent_for_eval=agent_for_eval,
+              eval_set=eval_set,
+              eval_metrics=eval_metrics,
+              num_runs=num_runs,
+              user_simulator_provider=user_simulator_provider,
+          )
+      )
+
+      results_manager = LocalEvalSetResultsManager(
+          agents_dir=os.fspath(self._results_dir)
+      )
+      all_eval_results: list[EvalCaseResult] = [
+          result
+          for eval_results_per_eval_id in eval_results_by_eval_id.values()
+          for result in eval_results_per_eval_id
+      ]
+      results_manager.save_eval_set_result(
+          app_name=_EVAL_APP_NAME,
+          eval_set_id=eval_set.eval_set_id,
+          eval_case_results=all_eval_results,
+      )
+
+      failures: list[str] = []
+      for eval_results_per_eval_id in eval_results_by_eval_id.values():
+        eval_metric_results = (
+            _AdkAgentEvaluator._get_eval_metric_results_with_invocation(
+                eval_results_per_eval_id
+            )
         )
-    )
+        failures_per_eval_case = (
+            _AdkAgentEvaluator._process_metrics_and_get_failures(
+                eval_metric_results=eval_metric_results,
+                print_detailed_results=print_detailed_results,
+                agent_module=agent_name,
+            )
+        )
+        failures.extend(failures_per_eval_case)
 
-    results_manager = LocalEvalSetResultsManager(
-        agents_dir=os.fspath(self._results_dir)
-    )
-    all_eval_results: list[EvalCaseResult] = [
-        result
-        for eval_results_per_eval_id in eval_results_by_eval_id.values()
-        for result in eval_results_per_eval_id
-    ]
-    results_manager.save_eval_set_result(
-        app_name=_EVAL_APP_NAME,
-        eval_set_id=eval_set.eval_set_id,
-        eval_case_results=all_eval_results,
-    )
-
-    failures: list[str] = []
-    for eval_results_per_eval_id in eval_results_by_eval_id.values():
-      eval_metric_results = (
-          _AdkAgentEvaluator._get_eval_metric_results_with_invocation(
-              eval_results_per_eval_id
-          )
-      )
-      failures_per_eval_case = (
-          _AdkAgentEvaluator._process_metrics_and_get_failures(
-              eval_metric_results=eval_metric_results,
-              print_detailed_results=print_detailed_results,
-              agent_module=agent_name,
-          )
-      )
-      failures.extend(failures_per_eval_case)
-
-    failure_message = 'Following are all the test failures.'
-    if not print_detailed_results:
-      failure_message += (
-          ' If you looking to get more details on the failures, then please'
-          ' re-run this test with `print_detailed_results` set to `True`.'
-      )
-    failure_message += '\n' + '\n'.join(failures)
-    assert not failures, failure_message
+      failure_message = 'Following are all the test failures.'
+      if not print_detailed_results:
+        failure_message += (
+            ' If you looking to get more details on the failures, then please'
+            ' re-run this test with `print_detailed_results` set to `True`.'
+        )
+      failure_message += '\n' + '\n'.join(failures)
+      assert not failures, failure_message

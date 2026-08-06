@@ -102,27 +102,26 @@ def write_metric_module(tmp_path):
 def _restore_metric_evaluator_registry():
   """Undoes custom-metric registrations, which ADK keeps in class-level state.
 
-  ``MetricEvaluatorRegistry._registry`` is a *class* attribute (verified in
-  google-adk 1.30 through 2.6), so every registry instance -- including the
-  process-wide ``DEFAULT_METRIC_EVALUATOR_REGISTRY`` that the fixture path
-  registers into -- shares one dict. Without restoring it, a test that
-  registers a custom metric would change how every later test resolves that
-  metric name.
+  A safety net, not the mechanism under test: ``pytest-adk eval`` owns its
+  process and deliberately leaves its registrations in place for the run, so
+  a CLI test would otherwise leak them into every later test. (The fixture
+  path restores its own registrations -- ``_registered_custom_metrics`` --
+  and ``tests/test_evaluation.py`` asserts that from *inside* the test body,
+  before this teardown runs, so this net cannot hide a regression there.)
 
   Autouse rather than opt-in because the leak happens wherever an eval runs,
   not only in the tests that are about custom metrics.
   """
+  from pytest_adk.metrics import default_metric_evaluator_registry
+  from pytest_adk.metrics import restored_registry_contents
+
   try:
-    from google.adk.evaluation.metric_evaluator_registry import (
-        MetricEvaluatorRegistry,
-    )
+    registry = default_metric_evaluator_registry()
   except ModuleNotFoundError:
     # google-adk v2 without google-cloud-aiplatform: nothing here can have
     # registered anything either, so there is nothing to restore.
     yield
     return
 
-  snapshot = dict(MetricEvaluatorRegistry._registry)
-  yield
-  MetricEvaluatorRegistry._registry.clear()
-  MetricEvaluatorRegistry._registry.update(snapshot)
+  with restored_registry_contents(registry):
+    yield
