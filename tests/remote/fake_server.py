@@ -61,8 +61,10 @@ class FakeApiServer:
   Two flags make session creation fail: ``reject_client_session_ids`` models a
   deployment whose session service assigns ids itself and refuses a
   client-supplied ``sessionId`` with a 400 while accepting the same request
-  without one, and ``fail_create_session_with_status`` fails every create with
-  a given status regardless of the body.
+  without one (issue #10) -- useful for asserting that a client never sends
+  one, since RemoteEvalService itself always omits it -- and
+  ``fail_create_session_with_status`` fails every create with a given status
+  regardless of the body.
   """
 
   def __init__(self, app_names: list[str] | None = None) -> None:

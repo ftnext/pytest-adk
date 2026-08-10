@@ -24,7 +24,6 @@ from typing import Any
 from typing import AsyncGenerator
 from typing import Sequence
 
-import httpx
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.errors.not_found_error import NotFoundError
 from google.adk.events import Event
@@ -64,24 +63,6 @@ except ModuleNotFoundError as e:
   raise ModuleNotFoundError(_MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
 
 logger = logging.getLogger(__name__)
-
-# Mirrors the ``EVAL_SESSION_ID_PREFIX`` convention ADK uses for locally
-# generated eval sessions (historically ``cli/cli_eval.py``; as of google-adk
-# 2.5.0 also defined in ``evaluation/local_eval_service.py``). Defined here
-# independently -- rather than imported -- so this module never has to import
-# ``google.adk.cli`` (which pulls in the whole FastAPI-based CLI stack) just
-# for a string constant.
-#
-# Worth requesting rather than always letting the server assign an id: an
-# api_server's ``GET /apps/{app_name}/users/{user_id}/sessions`` filters out
-# every session whose id starts with this prefix ("Remove sessions that were
-# generated as a part of Eval", verified in google-adk 2.5.0
-# ``cli/api_server.py``), so eval sessions that outlive a run -- under
-# ``keep_sessions``, or when the cleanup DELETE failed -- stay out of the
-# user's session listing. A server whose session service assigns ids in its
-# own format may reject the request, which is what
-# :meth:`RemoteEvalService._create_eval_session` falls back from (issue #10).
-_EVAL_SESSION_ID_PREFIX = '___eval___session___'
 
 _DUMMY_ROOT_AGENT_NAME = 'remote_eval_dummy_agent'
 
@@ -335,11 +316,6 @@ class RemoteEvalService(LocalEvalService):
     self._app_name = app_name
     self._default_user_id = default_user_id
     self._keep_sessions = keep_sessions
-    # Latched by _create_eval_session() the first time this server refuses a
-    # client-supplied session id, so the rest of the run (every other eval
-    # case, and every repeated perform_inference() call) goes straight to a
-    # server-assigned id instead of spending a rejected request each time.
-    self._server_assigns_session_ids = False
 
   async def perform_inference(
       self,
@@ -459,10 +435,8 @@ class RemoteEvalService(LocalEvalService):
     REMOTE_EVAL_PLAN.md sec 9 on version skew), that session is treated as
     already existing on the remote server: it is used as-is and never
     created or deleted here. Otherwise a fresh session is created by
-    :meth:`_create_eval_session`, which requests an ADK-style eval id but
-    falls back to a server-assigned one if the server refuses it. Either way
-    the *server's* returned ``Session.id`` is what subsequent calls use, never
-    the requested one, since an api_server may ignore it and assign its own.
+    :meth:`_create_eval_session`, and the *server's* returned ``Session.id``
+    -- no ``sessionId`` is ever requested -- is what subsequent calls use.
     Unless ``keep_sessions`` is set, sessions created here are deleted in
     a ``finally`` block; a failed delete is logged, not raised, since it
     should not affect this eval case's already-computed result.
@@ -545,8 +519,7 @@ class RemoteEvalService(LocalEvalService):
         session = await self._create_eval_session(
             user_id=user_id, initial_state=initial_state
         )
-        # Use the server's own id: an api_server may ignore the requested
-        # session_id and assign its own.
+        # The server assigns the id; no sessionId was sent in the request.
         session_id = session.id
         created_session = True
 
@@ -633,53 +606,26 @@ class RemoteEvalService(LocalEvalService):
   ) -> Session:
     """Creates a temporary session for one eval case.
 
-    Requests an ADK-style eval session id (``_EVAL_SESSION_ID_PREFIX`` +
-    uuid4) so the session stays hidden from the api_server's session listing,
-    but does not insist on it: a deployment whose session service assigns ids
-    in its own format rejects an unsupported client-supplied ``sessionId``,
-    while the very same request without one succeeds (issue #10). Such a
-    rejection is retried once with the id left to the server, and remembered
-    on ``self`` so the remaining eval cases skip the doomed first attempt.
-
-    Only a 4xx is treated as "this server does not take client-supplied ids".
-    The status such a server answers with is not fixed by any spec, so no
-    narrower set is assumed; a 5xx (the server is broken, not opinionated) and
-    a transport error propagate unchanged. A 4xx that was really about
-    something else -- an expired token, a wrong app name -- costs one extra
-    round trip before the retry surfaces the same error to the caller.
+    Never sends a client-supplied ``sessionId``: some session services reject
+    one outright, e.g. a deployment that assigns ids in its own format
+    (issue #10), or a Vertex AI-backed ``api_server``, which answers an
+    ADK-style ``___eval___session___...`` id with HTTP 500 rather than a 4xx
+    (issue #15) -- so there is no status code that reliably distinguishes "id
+    rejected" from "server broken" to retry on. The very same request without
+    a ``sessionId`` succeeds on every server observed so far, and the
+    server's returned ``Session.id`` is authoritative regardless, so nothing
+    is lost by never asking.
 
     Args:
         user_id: User to create the session for.
-        initial_state: Initial session state, or ``None`` to send none. It is
-            forwarded on both attempts.
+        initial_state: Initial session state, or ``None`` to send none.
 
     Returns:
-        The created :class:`~google.adk.sessions.Session`, whose ``id`` is
-        authoritative regardless of which attempt produced it.
+        The created :class:`~google.adk.sessions.Session`.
 
     Raises:
-        httpx.HTTPStatusError: If the server rejects the create request for a
-            reason other than the client-supplied id, or rejects the retry too.
+        httpx.HTTPStatusError: If the server rejects the create request.
     """
-    if not self._server_assigns_session_ids:
-      try:
-        return await self._client.create_session(
-            app_name=self._app_name,
-            user_id=user_id,
-            session_id=_EVAL_SESSION_ID_PREFIX + str(uuid.uuid4()),
-            state=initial_state,
-        )
-      except httpx.HTTPStatusError as e:
-        if e.response.status_code // 100 != 4:
-          raise
-        self._server_assigns_session_ids = True
-        logger.info(
-            'The server rejected a client-supplied session id with HTTP %s;'
-            ' creating eval sessions with server-assigned ids instead. (%s)',
-            e.response.status_code,
-            e,
-        )
-
     return await self._client.create_session(
         app_name=self._app_name,
         user_id=user_id,
