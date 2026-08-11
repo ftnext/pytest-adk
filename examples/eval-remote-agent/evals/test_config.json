@@ -1,0 +1,13 @@
+{
+  "criteria": {
+    "args_any_support_tool_trajectory_metric": 1.0
+  },
+  "custom_metrics": {
+    "args_any_support_tool_trajectory_metric": {
+      "code_config": {
+        "name": "home_automation_agent_evaluation.args_any_support_tool_trajectory_metric"
+      },
+      "description": "Exact tool-call trajectory by name and order, ignoring arguments."
+    }
+  }
+}

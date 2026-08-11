@@ -1,0 +1,16 @@
+eval_set_id = "home_automation_remote"
+
+[[eval_cases]]
+eval_id = "turn_off_device_2"
+
+[[eval_cases.conversation]]
+invocation_id = "turn-off-device-2"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [{ text = "Turn off device_2 in the Bedroom." }]
+
+[eval_cases.conversation.intermediate_data]
+tool_uses = [
+  { name = "set_device_info", args = { device_id = "device_2", status = "OFF", location = "ANY" } },
+]
