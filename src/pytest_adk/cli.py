@@ -224,11 +224,25 @@ def _google_adk_warnings_silenced() -> Iterator[None]:
   ``warnings.filters``, and removing from the stale global would silently do
   nothing, leaving the filters in place for the rest of the process.
 
-  ``list.remove()`` deletes the first *equal* entry, and equality here is
-  effectively identity (compiled patterns do not define ``__eq__``), so this
-  can only ever remove the exact objects that were appended. A missing entry
-  is tolerated: the block may legitimately have called
-  ``warnings.resetwarnings()``.
+  Entries are matched by *identity*, not equality, and ``list.remove()`` is
+  therefore not usable. Filter entries are plain tuples, so two of them
+  compare equal whenever their fields do -- and the compiled-pattern field
+  does not save us, because ``re.compile`` memoises: compiling the same
+  pattern with the same flags twice hands back the very same object. A
+  custom metric that registers, say,
+  ``filterwarnings('ignore', message=r'\\[EXPERIMENTAL\\]',
+  category=UserWarning)`` therefore builds a tuple equal to the one this
+  block installed. ``filterwarnings`` with the default ``append=False``
+  *removes any equal entry* before inserting at the front, so at that point
+  the entry here is already gone from the list and the metric's replacement
+  stands in its place -- and an equality-based removal would delete that
+  replacement, losing a registration the metric cannot make again (its
+  module stays in ``sys.modules``, so its body never re-runs). Identity
+  leaves the replacement alone and removes nothing, which is right: what
+  this block installed is no longer there.
+
+  A missing entry is tolerated for the same reason, and because the block
+  may legitimately have called ``warnings.resetwarnings()``.
 
   ``_filters_mutated()`` is private but is what the stdlib's own
   ``catch_warnings`` calls on exit, and is present on every supported Python
@@ -243,10 +257,10 @@ def _google_adk_warnings_silenced() -> Iterator[None]:
   finally:
     active = _active_warning_filters()
     for entry in installed:
-      try:
-        active.remove(entry)
-      except ValueError:
-        pass
+      for index, present in enumerate(active):
+        if present is entry:
+          del active[index]
+          break
     warnings._filters_mutated()
 
 

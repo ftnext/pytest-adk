@@ -304,6 +304,49 @@ def test_silenced_block_keeps_filters_registered_inside_it() -> None:
   ]
 
 
+def test_a_filter_equal_to_one_of_ours_registered_inside_the_block_survives() -> None:
+  """Cleanup matches the entries it installed by identity, not by equality.
+
+  Filter entries are plain tuples, and ``re.compile`` memoises, so a metric
+  module that registers ``filterwarnings('ignore',
+  message=r'\\[EXPERIMENTAL\\]', category=UserWarning)`` builds a tuple that
+  compares *equal* to the one the block installed -- same action, same
+  cached pattern object, same category, same ``None`` module, same lineno.
+  ``filterwarnings`` defaults to ``append=False``, which drops any equal
+  entry before inserting at the front, so by the end of the block the entry
+  this block added is already gone and the metric's stands in its place.
+  Removing by equality would delete that replacement and leave the metric
+  with no filter at all, unable to register it again from a module that
+  stays in ``sys.modules``.
+
+  Asserted behaviourally, for the reasons given in
+  :func:`test_silenced_block_keeps_filters_registered_inside_it`.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    with cli_module._google_adk_warnings_silenced():
+      warnings.filterwarnings(
+          'ignore', message=r'\[EXPERIMENTAL\]', category=UserWarning
+      )
+
+    # Still suppressed => the metric's replacement filter survived cleanup.
+    warnings.warn('[EXPERIMENTAL] the metric said so', UserWarning)
+    # Visible => the block's *other* filter really was cleaned up, so this
+    # is not just "cleanup did nothing at all".
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == [
+      'The `vertexai.preview.rag` module is deprecated'
+  ]
+
+
 def test_metric_warning_attributed_to_an_adk_call_site_still_surfaces() -> None:
   """A ``stacklevel`` warning from a custom metric is not ADK's to silence.
 
