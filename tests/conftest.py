@@ -118,8 +118,11 @@ def _restore_metric_evaluator_registry():
   try:
     registry = default_metric_evaluator_registry()
   except ModuleNotFoundError:
-    # google-adk v2 without google-cloud-aiplatform: nothing here can have
-    # registered anything either, so there is nothing to restore.
+    # pytest-adk declares google-cloud-aiplatform itself, so this should not
+    # happen in a normal install; kept as a safety net for an environment
+    # where pytest-adk's own dependencies are not fully installed -- nothing
+    # here can have registered anything either, so there is nothing to
+    # restore.
     yield
     return
 

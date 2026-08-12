@@ -58,10 +58,11 @@ def test_remote_package_lazily_exports_remote_eval_service() -> None:
 
   See ``pytest_adk/remote/__init__.py``'s module docstring: exporting it
   lazily (instead of with a plain top-level import) keeps
-  ``import pytest_adk.remote`` -- and therefore ``AdkApiClient`` -- usable
-  even where ``RemoteEvalService``'s import chain (``vertexai`` on
-  google-adk v2) is unavailable, since ``eval_service.py`` isn't touched
-  until ``RemoteEvalService`` is actually accessed.
+  ``import pytest_adk.remote`` -- and therefore ``AdkApiClient`` -- from
+  forcing pandas and the vertexai stack to be imported for callers who only
+  want ``AdkApiClient`` and never touch ``RemoteEvalService``, since
+  ``eval_service.py`` isn't touched until ``RemoteEvalService`` is actually
+  accessed.
   """
   import pytest_adk.remote as remote_package
 
