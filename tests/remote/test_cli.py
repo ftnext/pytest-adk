@@ -8,8 +8,11 @@ injected via ``main()``'s private ``transport`` hook.
 
 from __future__ import annotations
 
+import itertools
 import json
+import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import httpx
@@ -125,6 +128,383 @@ def test_eval_happy_path_saves_results_and_prints_location(
   # Sessions created for this run were cleaned up (default keep_sessions=False).
   assert server.create_session_requests
   assert server.deleted_session_ids
+
+
+# --- google-adk warning suppression ------------------------------------------
+#
+# `pytest-adk eval` imports `google.adk.evaluation.local_eval_service` (via the
+# lazily-imported `RemoteEvalService`), which is noisy: a `vertexai.preview.rag`
+# deprecation `UserWarning`, plus several `[EXPERIMENTAL] ...` `UserWarning`s
+# from ADK's `@experimental` decorator. `_silence_google_adk_warnings` (see
+# cli.py) filters these out by default without touching warnings that are not
+# google-adk's to begin with.
+
+
+def test_google_adk_warnings_are_silenced_but_user_warnings_are_not() -> None:
+  """Unit test of the helper: no ADK import needed, so this is version-independent.
+
+  ``warnings.resetwarnings()`` clears whatever ambient filters this process
+  (or an earlier test) has accumulated, giving a deterministic starting point:
+  with an empty filter list, the two filters the helper appends are the only
+  ones in play, so a warning that matches neither of them falls through to
+  Python's implicit default action (show once) rather than a leftover 'always'
+  or 'ignore' entry deciding its fate instead.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    cli_module._silence_google_adk_warnings()
+    # Mirrors the real vertexai.preview.rag deprecation warning: no
+    # `[EXPERIMENTAL]` prefix, attributed to a `google.adk` submodule.
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+    # Mirrors an [EXPERIMENTAL] warning attributed to pytest_adk's own module
+    # (stacklevel=2 from inside LocalEvalService.__init__), which the
+    # `module=` filter alone would not catch.
+    warnings.warn('[EXPERIMENTAL] LocalEvalService: ...', UserWarning)
+    # A genuine warning from the user's own code -- must not be touched.
+    warnings.warn('my agent said something', UserWarning)
+
+  assert [str(r.message) for r in records] == ['my agent said something']
+
+
+def test_pythonwarnings_style_filter_overrides_the_silencing_filters() -> None:
+  """Pins the documented opt-out: ``PYTHONWARNINGS=always::UserWarning``.
+
+  ``-W`` / ``PYTHONWARNINGS`` filters are installed by the interpreter at
+  startup, i.e. they are already in ``warnings.filters`` before ``main()``
+  runs. ``simplefilter`` reproduces exactly that starting state here
+  (it inserts at the *front* of the list, as startup filters effectively
+  are), which is why this can be asserted in-process instead of paying for
+  a subprocess. ``_silence_google_adk_warnings``' ``append=True`` then puts
+  its filters *behind* the user's, so the user's matches first and both
+  google-adk warnings stay visible.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    warnings.simplefilter('always', UserWarning)
+    cli_module._silence_google_adk_warnings()
+    warnings.warn('[EXPERIMENTAL] LocalEvalService: ...', UserWarning)
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == [
+      '[EXPERIMENTAL] LocalEvalService: ...',
+      'The `vertexai.preview.rag` module is deprecated',
+  ]
+
+
+def test_importing_pytest_adk_installs_no_warning_filters() -> None:
+  """The silencing filters belong to the CLI, not to ``import pytest_adk``.
+
+  This is the invariant behind the ``PLUGGABLE_AUTH`` limitation documented
+  in ``_silence_google_adk_warnings`` and the README: that warning fires
+  while ``google.adk`` is imported, so the only way to catch it would be a
+  filter installed at package import time -- which would silence warnings
+  for the pytest plugin path and for every library consumer too, not just
+  ``pytest-adk eval``. Deliberately not done, and pinned here.
+
+  Asserts the absence of *these* filters specifically rather than that
+  ``warnings.filters`` is unchanged: importing pytest-adk pulls in authlib
+  and urllib3, which legitimately register filters of their own
+  (``AuthlibDeprecationWarning``, ``DependencyWarning``, ...), so a
+  length/equality check against a bare interpreter would fail for reasons
+  that have nothing to do with pytest-adk.
+
+  Needs a subprocess: ``pytest_adk`` is already imported in this process, so
+  an in-process ``import`` would be a no-op and prove nothing.
+  """
+  probe = (
+      'import warnings, json\n'
+      'import pytest_adk\n'
+      'print(json.dumps([\n'
+      '    [f[0], getattr(f[1], "pattern", None), f[2].__name__,\n'
+      '     getattr(f[3], "pattern", None)]\n'
+      '    for f in warnings.filters\n'
+      ']))\n'
+  )
+  completed = subprocess.run(
+      [sys.executable, '-c', probe], capture_output=True, text=True, check=True
+  )
+  filters = json.loads(completed.stdout)
+
+  silencing = [
+      f
+      for f in filters
+      if f[0] == 'ignore'
+      and f[2] == 'UserWarning'
+      and (
+          f[1] == r'\[EXPERIMENTAL\]'
+          or f[3] == r'google\.adk\.dependencies(\.|$)'
+      )
+  ]
+  assert silencing == [], (
+      'importing pytest_adk installed the CLI\'s google-adk silencing '
+      f'filters ({silencing}); they must stay confined to cli.main() so the '
+      'pytest plugin path and library consumers keep their warnings'
+  )
+
+
+def test_silenced_block_keeps_filters_registered_inside_it() -> None:
+  """``main()`` cleans up its own two filters, not everyone else's.
+
+  A custom metric module is imported *inside* the silenced block (that is
+  what ``--pythonpath`` is for), and a module-level
+  ``warnings.filterwarnings(...)`` is a normal thing for library code to do
+  on import. Wrapping the block in ``warnings.catch_warnings()`` would
+  restore a snapshot on exit and throw that registration away -- and because
+  the module stays in ``sys.modules``, its body never re-runs to reinstate
+  it, so the filter would be gone from the process for good. Removing only
+  the two entries pytest-adk added leaves it alone.
+
+  Asserted through *behaviour* -- which warnings come out afterwards --
+  rather than by inspecting ``warnings.filters``. On free-threaded Python
+  3.14 (``sys.flags.context_aware_warnings``) an active ``catch_warnings()``
+  makes the filter list context-local while the module-global
+  ``warnings.filters`` attribute goes stale, and pytest's warnings plugin
+  holds such a block open around every test, so a list-inspecting assertion
+  silently measures nothing there. Warning behaviour stays truthful on every
+  supported Python.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    with cli_module._google_adk_warnings_silenced():
+      # Stands in for a metric module registering a filter as it is imported.
+      warnings.filterwarnings(
+          'ignore', message=r'REGISTERED_INSIDE', category=UserWarning
+      )
+
+    # Still suppressed => the registration made inside the block survived it.
+    warnings.warn('REGISTERED_INSIDE noise', UserWarning)
+    # Visible again => pytest-adk's own two filters were taken back out.
+    warnings.warn('[EXPERIMENTAL] LocalEvalService: ...', UserWarning)
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == [
+      '[EXPERIMENTAL] LocalEvalService: ...',
+      'The `vertexai.preview.rag` module is deprecated',
+  ]
+
+
+def test_a_filter_equal_to_one_of_ours_registered_inside_the_block_survives() -> None:
+  """Cleanup matches the entries it installed by identity, not by equality.
+
+  Filter entries are plain tuples, and ``re.compile`` memoises, so a metric
+  module that registers ``filterwarnings('ignore',
+  message=r'\\[EXPERIMENTAL\\]', category=UserWarning)`` builds a tuple that
+  compares *equal* to the one the block installed -- same action, same
+  cached pattern object, same category, same ``None`` module, same lineno.
+  ``filterwarnings`` defaults to ``append=False``, which drops any equal
+  entry before inserting at the front, so by the end of the block the entry
+  this block added is already gone and the metric's stands in its place.
+  Removing by equality would delete that replacement and leave the metric
+  with no filter at all, unable to register it again from a module that
+  stays in ``sys.modules``.
+
+  Asserted behaviourally, for the reasons given in
+  :func:`test_silenced_block_keeps_filters_registered_inside_it`.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    with cli_module._google_adk_warnings_silenced():
+      warnings.filterwarnings(
+          'ignore', message=r'\[EXPERIMENTAL\]', category=UserWarning
+      )
+
+    # Still suppressed => the metric's replacement filter survived cleanup.
+    warnings.warn('[EXPERIMENTAL] the metric said so', UserWarning)
+    # Visible => the block's *other* filter really was cleaned up, so this
+    # is not just "cleanup did nothing at all".
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == [
+      'The `vertexai.preview.rag` module is deprecated'
+  ]
+
+
+def test_metric_warning_attributed_to_an_adk_call_site_still_surfaces() -> None:
+  """A ``stacklevel`` warning from a custom metric is not ADK's to silence.
+
+  ADK calls a custom metric function directly from
+  ``google.adk.evaluation.custom_metric_evaluator``, so a metric that warns
+  with ``stacklevel=2`` -- the idiomatic way to point at the caller rather
+  than at the ``warnings.warn`` line itself -- has its warning *attributed*
+  to that ADK module. A ``module=`` filter keyed on ``google.adk`` at large
+  therefore used to swallow it, even with no ``[EXPERIMENTAL]`` prefix,
+  hiding a genuinely actionable metric warning. Keying on
+  ``google.adk.dependencies`` instead fixes that without giving up the one
+  warning the module filter exists for, which this also pins.
+
+  ``warn_explicit`` sets the attributed module directly, which is what a
+  real ``stacklevel`` hop resolves to, and keeps the test independent of
+  which google-adk version is installed.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    cli_module._silence_google_adk_warnings()
+    # A custom metric warning that stacklevel attributed to ADK's call site.
+    warnings.warn_explicit(
+        'metric found a real problem',
+        UserWarning,
+        'custom_metric_evaluator.py',
+        70,
+        module='google.adk.evaluation.custom_metric_evaluator',
+        registry={},
+    )
+    # ADK's own dependency-shim deprecation -- still suppressed.
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == ['metric found a real problem']
+
+
+def test_an_experimental_prefixed_user_warning_is_suppressed_too() -> None:
+  """Pins the documented exception to "your own warnings are unaffected".
+
+  The ``[EXPERIMENTAL]`` rule cannot also key on a module (ADK's
+  ``@experimental`` warns with ``stacklevel=2``, so the warning is
+  attributed to pytest-adk's own calling module, not to ``google.adk``), so
+  it necessarily matches on message text alone -- and therefore also hides a
+  user warning that happens to start with the same prefix. That trade-off is
+  documented in cli.py's module docstring and in the README's Limitations
+  section; this test exists so the behavior and those docs cannot drift
+  apart silently.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    cli_module._silence_google_adk_warnings()
+    warnings.warn('[EXPERIMENTAL] my own metric API', UserWarning)
+    # Same custom metric, message not starting with the prefix: still visible.
+    warnings.warn('my own metric API is experimental', UserWarning)
+
+  assert [str(r.message) for r in records] == [
+      'my own metric API is experimental'
+  ]
+
+
+def _silencing_filters() -> list:
+  """The entries ``_silence_google_adk_warnings`` adds, as found in a list."""
+  return [
+      f
+      for f in cli_module._active_warning_filters()
+      if f[0] == 'ignore'
+      and f[2] is UserWarning
+      and (
+          getattr(f[1], 'pattern', None) == r'\[EXPERIMENTAL\]'
+          or getattr(f[3], 'pattern', None)
+          == r'google\.adk\.dependencies(\.|$)'
+      )
+  ]
+
+
+def test_main_does_not_leak_warning_filters(tmp_path, capsys) -> None:
+  """Pins the cleanup that ``_google_adk_warnings_silenced`` does on exit.
+
+  Without it, each in-process ``main()`` call would append two more entries
+  to the global ``warnings.filters`` list (``filterwarnings(message=...)``
+  compiles a fresh regex each time, so repeats never compare equal and
+  never coalesce), growing it unboundedly across the test suite's ~40 calls.
+
+  Asserts the two filters are gone *and* that every filter present
+  beforehand survived, rather than comparing the whole list to a snapshot:
+  the cleanup deliberately removes only pytest-adk's own entries, so
+  anything else registered during the call (an imported module's own
+  ``filterwarnings``) is expected to still be there afterwards.
+  """
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+  filters_snapshot = list(warnings.filters)
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert _silencing_filters() == []
+  assert [f for f in filters_snapshot if f not in warnings.filters] == []
+
+
+def test_main_silences_adk_experimental_warnings(tmp_path, capsys) -> None:
+  """No `[EXPERIMENTAL]` notice reaches the CLI's actual output.
+
+  This checks `capsys`-captured stdout/stderr rather than pytest's `recwarn`
+  fixture: `recwarn` installs its own catch-all filter (`simplefilter`, which
+  -- despite the name -- inserts at the *front* of `warnings.filters`) so
+  that it can record every warning regardless of category or message: that
+  filter always matches first, before the `append=True` filters
+  `_silence_google_adk_warnings` adds, so it structurally cannot observe
+  anything being suppressed. Checking the captured output instead exercises
+  the behavior a real CLI invocation (with no such fixture already holding a
+  catch-all filter) actually has.
+  """
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  captured = capsys.readouterr()
+  assert exit_code == 0, captured.err
+  assert '[EXPERIMENTAL]' not in captured.out
+  assert '[EXPERIMENTAL]' not in captured.err
 
 
 def test_eval_metric_failure_exits_one_and_reports_per_case_metric(
@@ -1939,6 +2319,74 @@ def test_async_custom_metric_is_awaited_and_can_fail_the_run(
   assert 'quality: score=0.25' in err
   # A metric failure is still a verdict, so the results are saved.
   assert len(_saved_result_files(results_dir)) == 1
+
+
+# `write_metric_module`'s fixed source (tests/conftest.py) has no warning of
+# its own, so this metric module is authored directly here rather than via
+# that fixture -- everything else about it (a project-local module made
+# importable via --pythonpath, one metric function) mirrors the fixture's
+# module shape.
+_NOISY_METRIC_MODULE_SOURCE = '''\
+"""Project-local custom eval metric that also warns, like a real one might."""
+
+import warnings
+
+from google.adk.evaluation.evaluator import EvaluationResult
+from google.adk.evaluation.evaluator import EvalStatus
+from google.adk.evaluation.evaluator import PerInvocationResult
+
+warnings.warn('metric says hi')
+
+
+def noisy_metric(
+    eval_metric, actual_invocations, expected_invocations, conversation_scenario
+):
+  return EvaluationResult(
+      overall_score=0.75,
+      overall_eval_status=EvalStatus.PASSED,
+      per_invocation_results=[
+          PerInvocationResult(
+              actual_invocation=invocation, score=0.75, eval_status=EvalStatus.PASSED
+          )
+          for invocation in actual_invocations
+      ],
+  )
+'''
+
+_noisy_metric_module_counter = itertools.count()
+
+
+def test_user_warning_from_a_custom_metric_still_surfaces(tmp_path, capsys, recwarn) -> None:
+  """A UserWarning from project code is not caught by the google-adk filters.
+
+  Uses `recwarn` (unlike `test_main_silences_adk_experimental_warnings`,
+  which cannot): `recwarn` records *everything* regardless of category or
+  message, so it is well-suited to asserting a warning is present, just not
+  to asserting one has been suppressed.
+  """
+  metric_dir = tmp_path / 'lib'
+  metric_dir.mkdir(parents=True, exist_ok=True)
+  module_name = f'pytest_adk_noisy_metric_{next(_noisy_metric_module_counter)}'
+  (metric_dir / f'{module_name}.py').write_text(
+      _NOISY_METRIC_MODULE_SOURCE, encoding='utf-8'
+  )
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(f'{module_name}.noisy_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  try:
+    exit_code = _run_custom_metric_eval(
+        evalset_path, results_dir, server, '--pythonpath', str(metric_dir)
+    )
+  finally:
+    sys.modules.pop(module_name, None)
+
+  assert exit_code == 0, capsys.readouterr().err
+  assert any(str(w.message) == 'metric says hi' for w in recwarn.list)
 
 
 def test_custom_metric_module_is_found_in_the_working_directory(

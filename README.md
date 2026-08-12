@@ -445,3 +445,28 @@ command prints a clear error instead of a traceback.
   configs disagree about a metric name — can still see each other's
   registrations, and are not supported. (Running tests in parallel with
   pytest-xdist is fine: those are separate processes.)
+- google-adk's own deprecation and `[EXPERIMENTAL]` `UserWarning`s are
+  suppressed by default in `pytest-adk eval`'s output. To see them again, set
+  the environment variable:
+
+  ```bash
+  PYTHONWARNINGS=always::UserWarning pytest-adk eval https://my-agent.example.com tests/evals/
+  ```
+
+  The interpreter's `-W` option does the same thing but cannot be used here:
+  `-W` has to be consumed by `python` itself, so `pytest-adk eval -W ...`
+  would just pass `-W` to pytest-adk's own argument parser, which rejects it.
+
+  On **google-adk 1.30.0 and 1.31.0** one warning still gets through:
+  `[EXPERIMENTAL] feature FeatureName.PLUGGABLE_AUTH is enabled.` It is
+  emitted while `google.adk` is being imported, which happens during
+  `import pytest_adk` — before `pytest-adk eval` runs and can install any
+  filter. Suppressing it would mean filtering warnings at package import
+  time, which would also silence them for the pytest plugin and for anything
+  else importing pytest-adk, so it is deliberately left alone. google-adk
+  1.32.0 stopped emitting it; upgrading is the fix.
+
+  Warnings raised by your own agent or custom metric code are unaffected —
+  with one exception: the `[EXPERIMENTAL]` rule matches on message text alone,
+  so a `UserWarning` of your own whose message *starts with* `[EXPERIMENTAL]`
+  is suppressed too. Rename such a warning, or use `PYTHONWARNINGS` as above.
