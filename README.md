@@ -445,3 +445,8 @@ command prints a clear error instead of a traceback.
   configs disagree about a metric name — can still see each other's
   registrations, and are not supported. (Running tests in parallel with
   pytest-xdist is fine: those are separate processes.)
+- google-adk's own deprecation and `[EXPERIMENTAL]` `UserWarning`s are
+  suppressed by default in `pytest-adk eval`'s output; pass
+  `-W always::UserWarning` (or set `PYTHONWARNINGS=always::UserWarning`) to
+  see them again. Warnings raised by your own agent or custom metric code are
+  never affected.
