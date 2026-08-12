@@ -449,8 +449,8 @@ command prints a clear error instead of a traceback.
   suppressed by default in `pytest-adk eval`'s output. To see them again, set
   the environment variable:
 
-  ```console
-  $ PYTHONWARNINGS=always::UserWarning pytest-adk eval http://localhost:8000 evalset.toml
+  ```bash
+  PYTHONWARNINGS=always::UserWarning pytest-adk eval https://my-agent.example.com tests/evals/
   ```
 
   The interpreter's `-W` option does the same thing but cannot be used here:
