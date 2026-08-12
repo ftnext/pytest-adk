@@ -21,7 +21,9 @@ unavailable, and a missing-dependency error surfaces as a clean message on
 stderr (exit code 2) instead of a traceback when ``eval`` is actually run.
 
 Output: google-adk's own deprecation and ``[EXPERIMENTAL]`` ``UserWarning``s
-are suppressed by default (see :func:`_silence_google_adk_warnings`); set
+are suppressed by default (see :func:`_silence_google_adk_warnings`, which
+also documents the one warning that escapes this on google-adk 1.30.0 and
+1.31.0, because it fires before ``main()`` runs at all); set
 ``PYTHONWARNINGS=always::UserWarning`` in the environment to see them again.
 Note that the interpreter's ``-W`` option is *not* usable for this when
 running the ``pytest-adk`` console script: ``-W`` has to be consumed by
@@ -129,10 +131,18 @@ def _silence_google_adk_warnings() -> None:
   variable the caller may itself depend on, and -- unlike a ``warnings``
   filter -- it cannot be overridden by ``-W``.
 
-  Known accepted limitation: on google-adk 1.30.x, one
-  ``[EXPERIMENTAL] PLUGGABLE_AUTH`` warning is emitted at ``import
-  pytest_adk`` time itself, before this function (or even ``main()``) can
-  run. It is not reachable from here and is left as-is.
+  Known accepted limitation, on google-adk 1.30.0 and 1.31.0 only (1.32.0
+  stopped emitting it; those two are the affected releases in the supported
+  ``>=1.30.0,<3`` range -- there is no 1.30.1): one
+  ``[EXPERIMENTAL] feature FeatureName.PLUGGABLE_AUTH is enabled.`` warning
+  is emitted from ``google/adk/features/_feature_decorator.py`` while
+  ``google.adk`` is being imported -- which happens during ``import
+  pytest_adk`` itself, before this function or even ``main()`` can run. It is
+  therefore not reachable from here, and suppressing it would mean installing
+  a filter at ``pytest_adk`` import time, which would silently apply to the
+  pytest plugin path and to every library consumer of the package rather than
+  just this CLI. Left as-is and documented in the README instead; upgrading
+  google-adk is the actual fix.
   """
   warnings.filterwarnings(
       'ignore',

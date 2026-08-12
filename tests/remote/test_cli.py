@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -202,6 +203,54 @@ def test_pythonwarnings_style_filter_overrides_the_silencing_filters() -> None:
       '[EXPERIMENTAL] LocalEvalService: ...',
       'The `vertexai.preview.rag` module is deprecated',
   ]
+
+
+def test_importing_pytest_adk_installs_no_warning_filters() -> None:
+  """The silencing filters belong to the CLI, not to ``import pytest_adk``.
+
+  This is the invariant behind the ``PLUGGABLE_AUTH`` limitation documented
+  in ``_silence_google_adk_warnings`` and the README: that warning fires
+  while ``google.adk`` is imported, so the only way to catch it would be a
+  filter installed at package import time -- which would silence warnings
+  for the pytest plugin path and for every library consumer too, not just
+  ``pytest-adk eval``. Deliberately not done, and pinned here.
+
+  Asserts the absence of *these* filters specifically rather than that
+  ``warnings.filters`` is unchanged: importing pytest-adk pulls in authlib
+  and urllib3, which legitimately register filters of their own
+  (``AuthlibDeprecationWarning``, ``DependencyWarning``, ...), so a
+  length/equality check against a bare interpreter would fail for reasons
+  that have nothing to do with pytest-adk.
+
+  Needs a subprocess: ``pytest_adk`` is already imported in this process, so
+  an in-process ``import`` would be a no-op and prove nothing.
+  """
+  probe = (
+      'import warnings, json\n'
+      'import pytest_adk\n'
+      'print(json.dumps([\n'
+      '    [f[0], getattr(f[1], "pattern", None), f[2].__name__,\n'
+      '     getattr(f[3], "pattern", None)]\n'
+      '    for f in warnings.filters\n'
+      ']))\n'
+  )
+  completed = subprocess.run(
+      [sys.executable, '-c', probe], capture_output=True, text=True, check=True
+  )
+  filters = json.loads(completed.stdout)
+
+  silencing = [
+      f
+      for f in filters
+      if f[0] == 'ignore'
+      and f[2] == 'UserWarning'
+      and (f[1] == r'\[EXPERIMENTAL\]' or f[3] == r'google\.adk(\.|$)')
+  ]
+  assert silencing == [], (
+      'importing pytest_adk installed the CLI\'s google-adk silencing '
+      f'filters ({silencing}); they must stay confined to cli.main() so the '
+      'pytest plugin path and library consumers keep their warnings'
+  )
 
 
 def test_an_experimental_prefixed_user_warning_is_suppressed_too() -> None:

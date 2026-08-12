@@ -457,6 +457,15 @@ command prints a clear error instead of a traceback.
   `-W` has to be consumed by `python` itself, so `pytest-adk eval -W ...`
   would just pass `-W` to pytest-adk's own argument parser, which rejects it.
 
+  On **google-adk 1.30.0 and 1.31.0** one warning still gets through:
+  `[EXPERIMENTAL] feature FeatureName.PLUGGABLE_AUTH is enabled.` It is
+  emitted while `google.adk` is being imported, which happens during
+  `import pytest_adk` — before `pytest-adk eval` runs and can install any
+  filter. Suppressing it would mean filtering warnings at package import
+  time, which would also silence them for the pytest plugin and for anything
+  else importing pytest-adk, so it is deliberately left alone. google-adk
+  1.32.0 stopped emitting it; upgrading is the fix.
+
   Warnings raised by your own agent or custom metric code are unaffected —
   with one exception: the `[EXPERIMENTAL]` rule matches on message text alone,
   so a `UserWarning` of your own whose message *starts with* `[EXPERIMENTAL]`
