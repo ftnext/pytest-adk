@@ -21,10 +21,19 @@ unavailable, and a missing-dependency error surfaces as a clean message on
 stderr (exit code 2) instead of a traceback when ``eval`` is actually run.
 
 Output: google-adk's own deprecation and ``[EXPERIMENTAL]`` ``UserWarning``s
-are suppressed by default (see :func:`_silence_google_adk_warnings`); pass
-``-W always::UserWarning`` or set ``PYTHONWARNINGS=always::UserWarning`` to
-see them again. Warnings raised by your own agent or custom metric code are
-never affected.
+are suppressed by default (see :func:`_silence_google_adk_warnings`); set
+``PYTHONWARNINGS=always::UserWarning`` in the environment to see them again.
+Note that the interpreter's ``-W`` option is *not* usable for this when
+running the ``pytest-adk`` console script: ``-W`` has to be consumed by
+``python`` itself, and ``pytest-adk eval -W ...`` would just hand ``-W`` to
+this module's argparse parser, which rejects it. ``PYTHONWARNINGS`` is the
+supported opt-out.
+
+Warnings raised by your own agent or custom metric code are unaffected, with
+one deliberate exception: the ``[EXPERIMENTAL]`` rule matches on message text
+alone (it has to -- see :func:`_silence_google_adk_warnings`), so a
+``UserWarning`` of your own whose message *starts with* ``[EXPERIMENTAL]``
+is suppressed too.
 """
 
 from __future__ import annotations
@@ -95,11 +104,24 @@ def _silence_google_adk_warnings() -> None:
   raised by the user's own agent code or a custom metric module (which can
   live in that same call stack) must stay visible.
 
+  Accepted cost of the message-only rule: because it cannot also key on a
+  module (per the first bullet above), it matches purely on message text,
+  so a ``UserWarning`` raised by the user's own code whose message begins
+  with ``[EXPERIMENTAL]`` -- e.g. a custom metric announcing an experimental
+  API of its own -- is suppressed as well. This is judged an acceptable
+  trade against dropping ADK's ``[EXPERIMENTAL]`` suppression entirely, and
+  is called out in this module's docstring and in the README so the
+  narrowed guarantee is the documented one.
+
   ``append=True`` on both filters places them after Python's five default
   filters (none of which match ``UserWarning``) and after any filter the
-  user supplied via ``-W`` / ``PYTHONWARNINGS``, so e.g.
-  ``-W error::UserWarning`` still wins over these -- see :func:`main`, which
-  documents this as the opt-out.
+  user supplied via ``-W`` / ``PYTHONWARNINGS`` (those are installed at
+  interpreter startup, so they are already in ``warnings.filters`` by the
+  time ``main()`` runs), so e.g. ``PYTHONWARNINGS=always::UserWarning``
+  still wins over these. That environment variable -- not ``-W``, which
+  ``python`` would have to consume and which the ``pytest-adk`` console
+  script therefore cannot accept -- is the documented opt-out; see this
+  module's docstring.
 
   google-adk also offers an ``ADK_SUPPRESS_EXPERIMENTAL_FEATURE_WARNINGS``
   environment variable, considered and rejected here: it does not cover the

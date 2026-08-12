@@ -172,6 +172,62 @@ def test_google_adk_warnings_are_silenced_but_user_warnings_are_not() -> None:
   assert [str(r.message) for r in records] == ['my agent said something']
 
 
+def test_pythonwarnings_style_filter_overrides_the_silencing_filters() -> None:
+  """Pins the documented opt-out: ``PYTHONWARNINGS=always::UserWarning``.
+
+  ``-W`` / ``PYTHONWARNINGS`` filters are installed by the interpreter at
+  startup, i.e. they are already in ``warnings.filters`` before ``main()``
+  runs. ``simplefilter`` reproduces exactly that starting state here
+  (it inserts at the *front* of the list, as startup filters effectively
+  are), which is why this can be asserted in-process instead of paying for
+  a subprocess. ``_silence_google_adk_warnings``' ``append=True`` then puts
+  its filters *behind* the user's, so the user's matches first and both
+  google-adk warnings stay visible.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    warnings.simplefilter('always', UserWarning)
+    cli_module._silence_google_adk_warnings()
+    warnings.warn('[EXPERIMENTAL] LocalEvalService: ...', UserWarning)
+    warnings.warn_explicit(
+        'The `vertexai.preview.rag` module is deprecated',
+        UserWarning,
+        'vertexai.py',
+        19,
+        module='google.adk.dependencies.vertexai',
+        registry={},
+    )
+
+  assert [str(r.message) for r in records] == [
+      '[EXPERIMENTAL] LocalEvalService: ...',
+      'The `vertexai.preview.rag` module is deprecated',
+  ]
+
+
+def test_an_experimental_prefixed_user_warning_is_suppressed_too() -> None:
+  """Pins the documented exception to "your own warnings are unaffected".
+
+  The ``[EXPERIMENTAL]`` rule cannot also key on a module (ADK's
+  ``@experimental`` warns with ``stacklevel=2``, so the warning is
+  attributed to pytest-adk's own calling module, not to ``google.adk``), so
+  it necessarily matches on message text alone -- and therefore also hides a
+  user warning that happens to start with the same prefix. That trade-off is
+  documented in cli.py's module docstring and in the README's Limitations
+  section; this test exists so the behavior and those docs cannot drift
+  apart silently.
+  """
+  with warnings.catch_warnings(record=True) as records:
+    warnings.resetwarnings()
+    cli_module._silence_google_adk_warnings()
+    warnings.warn('[EXPERIMENTAL] my own metric API', UserWarning)
+    # Same custom metric, message not starting with the prefix: still visible.
+    warnings.warn('my own metric API is experimental', UserWarning)
+
+  assert [str(r.message) for r in records] == [
+      'my own metric API is experimental'
+  ]
+
+
 def test_main_does_not_leak_warning_filters(tmp_path, capsys) -> None:
   """Pins the ``catch_warnings()`` wrapper around ``main()``'s body.
 

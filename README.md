@@ -446,7 +446,18 @@ command prints a clear error instead of a traceback.
   registrations, and are not supported. (Running tests in parallel with
   pytest-xdist is fine: those are separate processes.)
 - google-adk's own deprecation and `[EXPERIMENTAL]` `UserWarning`s are
-  suppressed by default in `pytest-adk eval`'s output; pass
-  `-W always::UserWarning` (or set `PYTHONWARNINGS=always::UserWarning`) to
-  see them again. Warnings raised by your own agent or custom metric code are
-  never affected.
+  suppressed by default in `pytest-adk eval`'s output. To see them again, set
+  the environment variable:
+
+  ```console
+  $ PYTHONWARNINGS=always::UserWarning pytest-adk eval http://localhost:8000 evalset.toml
+  ```
+
+  The interpreter's `-W` option does the same thing but cannot be used here:
+  `-W` has to be consumed by `python` itself, so `pytest-adk eval -W ...`
+  would just pass `-W` to pytest-adk's own argument parser, which rejects it.
+
+  Warnings raised by your own agent or custom metric code are unaffected —
+  with one exception: the `[EXPERIMENTAL]` rule matches on message text alone,
+  so a `UserWarning` of your own whose message *starts with* `[EXPERIMENTAL]`
+  is suppressed too. Rename such a warning, or use `PYTHONWARNINGS` as above.
