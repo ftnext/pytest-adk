@@ -19,9 +19,11 @@ Import constraint: ``google.adk.evaluation.metric_evaluator_registry`` is
 never imported at module scope here, only inside the two functions that need
 a registry object. On google-adk v2 its import chain requires ``vertexai``
 (google-cloud-aiplatform) as a side effect of building the default registry --
-the same dependency documented in :mod:`pytest_adk.remote.eval_service` -- and
-this module has to stay importable without it so that merely *loading* it
-costs nothing extra. The other google-adk imports below were verified
+the same dependency documented in :mod:`pytest_adk.remote.eval_service`, and
+one pytest-adk declares itself -- and this module still stays importable
+without it (lazy rather than hoisted to module scope) so that merely
+*loading* this module costs nothing extra even in an environment where that
+dependency is missing. The other google-adk imports below were verified
 (google-adk 1.30.0 through 2.6.1) to be free of that chain.
 """
 
@@ -57,14 +59,14 @@ _DEFAULT_MAX_SCORE = 1.0
 
 _MISSING_EVAL_DEPENDENCIES_MESSAGE = (
     'Registering custom eval metrics needs'
-    " google.adk.evaluation.metric_evaluator_registry, which requires"
-    ' google-adk\'s `eval` extra: `pip install "google-adk[eval]"`. On'
-    " google-adk v2 that module's import chain additionally requires"
-    ' `vertexai` (google-cloud-aiplatform) purely as an import-time side'
-    " effect of building the default registry. If pytest-adk's own"
-    ' dependencies are already installed, adding the base'
-    ' `google-cloud-aiplatform` package on top is therefore sufficient'
-    ' without pulling in the rest of the `eval` extra.'
+    " google.adk.evaluation.metric_evaluator_registry, which requires a"
+    ' dependency pytest-adk itself declares: google-cloud-aiplatform. On'
+    " google-adk v2 that module's import chain requires `vertexai` (from"
+    ' google-cloud-aiplatform) purely as an import-time side effect of'
+    ' building the default registry. This error means pytest-adk\'s own'
+    " declared dependencies are not fully installed in this environment;"
+    ' reinstalling pytest-adk (`pip install --force-reinstall pytest-adk` or'
+    ' equivalent) should resolve it.'
 )
 
 
@@ -73,7 +75,8 @@ def _new_default_registry() -> MetricEvaluatorRegistry:
 
   Raises:
       ModuleNotFoundError: With :data:`_MISSING_EVAL_DEPENDENCIES_MESSAGE`
-          when the registry's import chain is unavailable, mirroring
+          when the registry's import chain is unavailable (pytest-adk's own
+          declared dependencies are not fully installed), mirroring
           ``google.adk.evaluation.agent_evaluator``'s own
           ``MISSING_EVAL_DEPENDENCIES_MESSAGE`` treatment rather than letting
           a bare ``No module named 'vertexai'`` escape.

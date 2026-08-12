@@ -1649,6 +1649,7 @@ version = "0.0.7"
 source = { editable = "." }
 dependencies = [
     { name = "google-adk" },
+    { name = "google-cloud-aiplatform" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "rouge-score" },
@@ -1659,7 +1660,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "google-cloud-aiplatform" },
     { name = "jinja2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1671,7 +1671,7 @@ jinja = [
 [package.metadata]
 requires-dist = [
     { name = "google-adk", specifier = ">=1.30.0,<3" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'dev'" },
+    { name = "google-cloud-aiplatform", specifier = ">=1.148.1,<2" },
     { name = "jinja2", marker = "extra == 'dev'" },
     { name = "jinja2", marker = "extra == 'jinja'" },
     { name = "pandas", specifier = ">=2.2.3" },

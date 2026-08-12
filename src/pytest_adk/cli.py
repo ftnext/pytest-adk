@@ -15,10 +15,11 @@ persistence reuse the same local ADK evaluation machinery as the
 Import constraint: :mod:`pytest_adk.remote.eval_service` (``RemoteEvalService``)
 is imported lazily, inside :func:`_run_eval`, rather than at module scope. On
 google-adk v2 its import chain additionally requires ``vertexai`` (see that
-module's docstring); importing it lazily means ``pytest-adk --help`` /
-``pytest-adk eval --help`` keep working even where that dependency is
-unavailable, and a missing-dependency error surfaces as a clean message on
-stderr (exit code 2) instead of a traceback when ``eval`` is actually run.
+module's docstring), which pytest-adk declares as a normal dependency itself;
+importing it lazily means ``pytest-adk --help`` / ``pytest-adk eval --help``
+keep working even in an environment where that dependency is somehow missing,
+and a missing-dependency error surfaces as a clean message on stderr (exit
+code 2) instead of a traceback when ``eval`` is actually run.
 """
 
 from __future__ import annotations
@@ -413,10 +414,10 @@ async def _run_eval(
   """Implements the ``eval`` subcommand. See :func:`main` for the contract."""
   try:
     # _pinned_session_id comes from the same module (and the same lazy import,
-    # for the vertexai-dependency reason in this module's docstring) as the
-    # runtime that acts on it, so the guard below and the session-creation
-    # branch in _perform_remote_inference_single_eval_item share one predicate by
-    # construction and cannot drift apart.
+    # for the vertexai-dependency reason documented in this module's
+    # docstring) as the runtime that acts on it, so the guard below and the
+    # session-creation branch in _perform_remote_inference_single_eval_item
+    # share one predicate by construction and cannot drift apart.
     from .remote.eval_service import _group_eval_cases_by_pinned_session
     from .remote.eval_service import _pinned_session_id
     from .remote.eval_service import _pinned_session_state_error

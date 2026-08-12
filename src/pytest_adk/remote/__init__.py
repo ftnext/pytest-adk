@@ -7,12 +7,14 @@ google-adk's ``eval`` extra) so it stays usable without pulling in pandas.
 
 ``eval_service.py`` (``RemoteEvalService``), by contrast, needs
 ``google.adk.evaluation.local_eval_service`` -- on google-adk v2 that
-transitively needs ``vertexai`` (see ``eval_service.py``'s module docstring).
-``RemoteEvalService`` is therefore exported lazily via ``__getattr__`` below
-rather than imported at module load time, so that ``import pytest_adk.remote``
-(and thus ``AdkApiClient``) keeps working even where that dependency chain is
-unavailable; the requirement only bites once ``RemoteEvalService`` is actually
-accessed.
+transitively needs ``vertexai`` (see ``eval_service.py``'s module docstring),
+and it also needs pandas (see the top-level package docstring). Even though
+pytest-adk declares both as normal dependencies, ``RemoteEvalService`` is
+still exported lazily via ``__getattr__`` below rather than imported at
+module load time: that way ``import pytest_adk.remote`` (and thus
+``AdkApiClient``) does not force pandas and the vertexai stack to be imported
+for callers who only want ``AdkApiClient`` and never touch
+``RemoteEvalService``.
 """
 
 from __future__ import annotations
