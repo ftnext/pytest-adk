@@ -77,7 +77,24 @@ from .metrics import check_custom_metrics_are_consistent
 from .remote.client import AdkApiClient
 
 
-def _silence_google_adk_warnings() -> None:
+def _active_warning_filters() -> list:
+  """The filter list that ``warnings.filterwarnings`` actually mutates.
+
+  Usually this is the module-global ``warnings.filters``. Python 3.14 added
+  context-aware warnings (``sys.flags.context_aware_warnings``, on by default
+  in free-threaded builds), where an active ``catch_warnings()`` moves the
+  filters into a context variable so the block is context- and thread-safe;
+  the module global then goes stale, and appending to or removing from it has
+  no effect on what ``warnings.warn`` consults. ``warnings._get_filters()``
+  returns whichever list is live. It is private, but it is the only accessor
+  there is, and the ``getattr`` fallback covers every Python before 3.14,
+  where the global is the only list that exists.
+  """
+  get_filters = getattr(warnings, '_get_filters', None)
+  return get_filters() if get_filters is not None else warnings.filters
+
+
+def _silence_google_adk_warnings() -> tuple[tuple, ...]:
   """Suppresses google-adk-originated ``UserWarning``s for CLI output.
 
   google-adk's evaluation import chain is noisy by default: importing
@@ -97,9 +114,25 @@ def _silence_google_adk_warnings() -> None:
   - The ``message=`` filter alone would miss the ``vertexai.preview.rag``
     deprecation warning, which carries no ``[EXPERIMENTAL]`` prefix.
 
-  The ``module`` pattern's ``(\\.|$)`` guard matches ``google.adk`` and any
-  of its submodules but not an unrelated package that merely starts with the
-  same characters (e.g. a hypothetical ``google.adkfoo``).
+  The ``module`` pattern is deliberately ``google.adk.dependencies`` and not
+  ``google.adk`` at large. A ``module=`` filter is matched against the module
+  the warning is *attributed* to, which ``stacklevel`` moves up the stack --
+  so a broad ``google\\.adk`` pattern also covers
+  ``google.adk.evaluation.custom_metric_evaluator``, which is exactly where
+  ADK calls a user's custom metric function from. A metric that warned with
+  ``stacklevel=2`` (idiomatic: point at the caller, not at the metric's own
+  line) would then be silently swallowed even though its message has no
+  ``[EXPERIMENTAL]`` prefix. Narrowing to ``google.adk.dependencies`` keeps
+  that from happening: no user code is ever called from there, so nothing
+  but ADK's own dependency shims can be attributed to it.
+
+  Checked against every google-adk in the supported ``>=1.30.0,<3`` range
+  (1.30.0, 1.31.0, 1.33.0, 1.35.0, 1.37.0, 2.0.0, 2.5.0):
+  ``google.adk.dependencies.vertexai`` is the only ``google.adk`` module that
+  emits a ``UserWarning`` without an ``[EXPERIMENTAL]`` prefix, so this
+  narrower pattern suppresses everything the broad one usefully did. The
+  ``(\\.|$)`` guard matches that package and its submodules but not an
+  unrelated one that merely starts with the same characters.
 
   Deliberately scoped to ``category=UserWarning`` only, and not keyed on
   ``pytest_adk.remote.eval_service`` as a module: a genuine ``UserWarning``
@@ -143,19 +176,78 @@ def _silence_google_adk_warnings() -> None:
   pytest plugin path and to every library consumer of the package rather than
   just this CLI. Left as-is and documented in the README instead; upgrading
   google-adk is the actual fix.
+
+  Returns:
+      The filter entries actually appended to ``warnings.filters``, in the
+      order they were added, so :func:`_google_adk_warnings_silenced` can
+      take exactly those back out again. The list length is checked rather
+      than assuming each call appended: ``filterwarnings(append=True)`` is a
+      no-op when an identical entry is already present, and treating
+      ``filters[-1]`` as ours regardless would hand the caller somebody
+      else's filter to delete.
   """
-  warnings.filterwarnings(
-      'ignore',
-      message=r'\[EXPERIMENTAL\]',
-      category=UserWarning,
-      append=True,
-  )
-  warnings.filterwarnings(
-      'ignore',
-      category=UserWarning,
-      module=r'google\.adk(\.|$)',
-      append=True,
-  )
+  installed = []
+  for keyed_on in (
+      {'message': r'\[EXPERIMENTAL\]'},
+      {'module': r'google\.adk\.dependencies(\.|$)'},
+  ):
+    active = _active_warning_filters()
+    before = len(active)
+    warnings.filterwarnings(
+        'ignore', category=UserWarning, append=True, **keyed_on
+    )
+    if len(active) > before:
+      installed.append(active[-1])
+  return tuple(installed)
+
+
+@contextlib.contextmanager
+def _google_adk_warnings_silenced() -> Iterator[None]:
+  """Applies :func:`_silence_google_adk_warnings` for the duration of a block.
+
+  Removes exactly the two filters it added, rather than wrapping the block in
+  ``warnings.catch_warnings()``. Both approaches stop the filters leaking out
+  of an in-process ``main()`` call -- which matters because
+  ``filterwarnings(message=...)`` entries carry a freshly compiled regex and
+  so never compare equal to one another, meaning repeated calls would
+  otherwise grow ``warnings.filters`` without bound -- but ``catch_warnings()``
+  restores a *snapshot*, throwing away every unrelated change made in between.
+  A custom metric module is imported inside this block (see ``--pythonpath``),
+  and a module-level ``warnings.filterwarnings(...)`` in it is a normal thing
+  for library code to do; with a snapshot restore that registration is
+  discarded, and because the module stays in ``sys.modules`` its body never
+  re-runs to reinstate it. Same for anything else the block imports, and for
+  ``warnings.showwarning``, which ``catch_warnings()`` also rolls back.
+
+  Removal goes through :func:`_active_warning_filters` for the same reason
+  the install does: on context-aware-warnings builds the live list may not be
+  ``warnings.filters``, and removing from the stale global would silently do
+  nothing, leaving the filters in place for the rest of the process.
+
+  ``list.remove()`` deletes the first *equal* entry, and equality here is
+  effectively identity (compiled patterns do not define ``__eq__``), so this
+  can only ever remove the exact objects that were appended. A missing entry
+  is tolerated: the block may legitimately have called
+  ``warnings.resetwarnings()``.
+
+  ``_filters_mutated()`` is private but is what the stdlib's own
+  ``catch_warnings`` calls on exit, and is present on every supported Python
+  (3.10-3.14). It bumps the filter-version counter that invalidates each
+  module's ``__warningregistry__``; without it, a warning that these filters
+  suppressed during the block could stay cached as "already handled" and
+  remain invisible after they are gone.
+  """
+  installed = _silence_google_adk_warnings()
+  try:
+    yield
+  finally:
+    active = _active_warning_filters()
+    for entry in installed:
+      try:
+        active.remove(entry)
+      except ValueError:
+        pass
+    warnings._filters_mutated()
 
 
 _DEFAULT_USER_ID = 'eval_user'
@@ -490,18 +582,15 @@ def main(
       evaluator, or any eval case whose inference failed) or when no
       subcommand is given.
   """
-  # catch_warnings() restores the global `warnings.filters` list on exit, so
-  # the filters _silence_google_adk_warnings() appends do not stick around
-  # in-process: filterwarnings(message=...) entries carry a compiled regex
-  # and never compare equal to one another, so without this, each of the
-  # test suite's ~40 in-process main() calls would grow `warnings.filters`
-  # by two entries, unboundedly. This also covers the `--help` /
-  # no-subcommand paths below, which return early via SystemExit-free
-  # `return` statements -- and argparse's own `--help` SystemExit still
-  # unwinds the context manager normally, restoring the filters either way.
-  with warnings.catch_warnings():
-    _silence_google_adk_warnings()
-
+  # Takes the two silencing filters back out on the way out, so they do not
+  # stick around across in-process main() calls (the test suite makes ~40 of
+  # them, and each would otherwise grow `warnings.filters` by two entries --
+  # see _google_adk_warnings_silenced, which also explains why this is not
+  # `warnings.catch_warnings()`). This covers the `--help` / no-subcommand
+  # paths below, which return early via SystemExit-free `return` statements
+  # -- and argparse's own `--help` SystemExit still unwinds the context
+  # manager normally, cleaning up either way.
+  with _google_adk_warnings_silenced():
     parser = _build_parser()
     args = parser.parse_args(argv)
 
