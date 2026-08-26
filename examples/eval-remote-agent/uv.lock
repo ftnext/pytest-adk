@@ -824,15 +824,11 @@ name = "home-automation-agent-evaluation"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "google-cloud-aiplatform" },
     { name = "pytest-adk" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "google-cloud-aiplatform", specifier = ">=1.163.0" },
-    { name = "pytest-adk", specifier = ">=0.0.7,<1" },
-]
+requires-dist = [{ name = "pytest-adk", specifier = ">=0.0.7,<1" }]
 
 [[package]]
 name = "httpcore"
@@ -1348,18 +1344,19 @@ wheels = [
 
 [[package]]
 name = "pytest-adk"
-version = "0.0.7"
+version = "0.0.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-adk" },
+    { name = "google-cloud-aiplatform" },
     { name = "pandas" },
     { name = "rouge-score" },
     { name = "tabulate" },
     { name = "tomli-w" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/46/31/d766dd61473da81bbe1b633eaa9baaefb6bb192d41f3014e2fffd8df5659/pytest_adk-0.0.7.tar.gz", hash = "sha256:6be0364022622193ee0d7c9615118ecc218f4fad345d7dbae940ff22ccfe507b", size = 50395, upload-time = "2026-08-11T08:35:23Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/de/00788037e80a76acb7ee12d4dac401dbf0e7228f1367eb946fc85aac55b6/pytest_adk-0.0.8.tar.gz", hash = "sha256:fadf0d1905a8de107f89aac163dc6c524643176efd421793a97a6adf7916c80b", size = 56567, upload-time = "2026-08-26T06:47:42.219Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/cf/58c3fa258fbdcaaf6ca308058a1dac92b629799ff3e3364a674c718c36d2/pytest_adk-0.0.7-py3-none-any.whl", hash = "sha256:8ba4104038e8255dbc7266d890eddc9339f8526b053911e25eac5ab020898bb6", size = 56987, upload-time = "2026-08-11T08:35:21.343Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/5a/7cfea1674174a06db50216dd6c6316d3153a2b6821c1c55b0cb155544320/pytest_adk-0.0.8-py3-none-any.whl", hash = "sha256:fd29c80f754c2a9db46a3f8e39ac508de6ca0a52498a38c193dcb8716daa048b", size = 63262, upload-time = "2026-08-26T06:47:40.781Z" },
 ]
 
 [[package]]

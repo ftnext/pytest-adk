@@ -3,7 +3,6 @@ name = "home-automation-agent-evaluation"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "google-cloud-aiplatform>=1.163.0",
     "pytest-adk>=0.0.7,<1",
 ]
 
