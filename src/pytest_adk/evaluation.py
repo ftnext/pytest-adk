@@ -134,9 +134,13 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     atomically renamed -- claiming them, so concurrent recoverers cannot
     process the same one -- and salvaged like this save's own staging.
     Younger directories are left alone: they may belong to a save still in
-    flight, and salvaging mid-write could publish a partial document. (The
-    claimed name keeps the staging prefix, so a recovery that itself dies
-    is picked up again by a later save.)
+    flight, and salvaging mid-write could publish a partial document. The
+    claimed name is a fresh fixed-length one (never a suffix appended to
+    the old name, which would grow on every failed recovery until rename
+    hits the filesystem's name limit and the directory becomes permanently
+    unrecoverable); it keeps the staging prefix and its quiet clock is
+    restarted, so a recovery that itself dies is simply picked up again by
+    a later save.
     """
     now = time.time()
     for entry in list(history_dir.glob(_STAGING_PREFIX + '*')):
@@ -146,8 +150,14 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         newest = max(p.stat().st_mtime for p in (entry, *entry.rglob('*')))
         if now - newest < _STAGING_RECOVERY_AGE_SECONDS:
           continue
-        claimed = entry.with_name(entry.name + '.recovering')
+        claimed = entry.with_name(
+            f'{_STAGING_PREFIX}recovering-{os.urandom(4).hex()}'
+        )
         entry.rename(claimed)
+        # Restart the quiet clock: concurrent savers leave the claimed
+        # directory alone while this salvage runs, and if this process dies
+        # the age check makes it eligible again an hour later.
+        os.utime(claimed)
       except OSError:
         # Recovered, removed, or still being written by someone else.
         continue

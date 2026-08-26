@@ -563,7 +563,9 @@ def test_abandoned_staging_is_recovered_but_live_staging_is_not(
       'marker': 'abandoned'
   }
   assert not abandoned.exists()
-  assert not (history_dir / '.staging-abandoned.recovering').exists()
+  # The claimed intermediate name is gone too: only the live directory's
+  # staging entry remains.
+  assert [p.name for p in history_dir.glob('.staging-*')] == ['.staging-live']
   # The fresh directory might belong to a save in flight: untouched.
   assert json.loads(live_file.read_text(encoding='utf-8')) == {'marker': 'live'}
 
