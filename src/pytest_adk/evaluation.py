@@ -161,9 +161,11 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     A taken name gets a ``-2``, ``-3``, ... variant rather than being
     overwritten or -- worse -- the move being skipped, which would let the
     caller's cleanup delete ``path`` with this save's data still inside.
-    The name is claimed atomically (``os.link``, or exclusive-create where
-    hard links are unsupported) so a concurrent claimer of the same name
-    cannot be overwritten either.
+    ``os.link`` claims the name and publishes the complete document in one
+    atomic step. Where hard links are unsupported, a hidden ``.lock`` name
+    is claimed instead of the destination itself, so even a crash mid-move
+    can never leave an empty file under a discoverable result name; the
+    data then lands via atomic ``os.replace``.
     """
     counter = 1
     while True:
@@ -174,15 +176,22 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         counter += 1
         continue
       except OSError:
-        # No hard-link support: exclusive-create claims the name, then the
-        # data immediately replaces the placeholder.
+        # No hard-link support (e.g. FAT/exFAT). The exclusive-create claim
+        # goes to a hidden lock name -- never to ``candidate`` itself, which
+        # a crash would leave behind as an empty result file.
+        lock = candidate.with_name(f'.{candidate.name}.lock')
         try:
-          with open(candidate, 'x', encoding='utf-8'):
+          with open(lock, 'x', encoding='utf-8'):
             pass
         except FileExistsError:
           counter += 1
           continue
+        if candidate.exists():
+          lock.unlink(missing_ok=True)
+          counter += 1
+          continue
         os.replace(path, candidate)
+        lock.unlink(missing_ok=True)
         return
       path.unlink()
       return

@@ -377,6 +377,48 @@ def test_salvage_keeps_result_when_destination_name_is_taken(tmp_path) -> None:
   assert not staging_dir.exists()
 
 
+def test_salvage_without_hard_links_leaves_no_empty_results(
+    tmp_path, monkeypatch
+) -> None:
+  """The no-hard-link fallback must not stage empty files at result names.
+
+  The exclusive-create claim goes to a hidden ``.lock`` name, so no
+  ``*.evalset_result.json`` name ever exists without its full content; on
+  success the lock is removed and collisions still dedupe with ``-2``.
+  """
+
+  def _no_hard_links(src, dst, **kwargs):
+    raise OSError('hard links not supported')
+
+  monkeypatch.setattr(evaluation_module.os, 'link', _no_hard_links)
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  existing = history_dir / 'test_app_single.test_123.5.evalset_result.json'
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"first": true}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = (
+      staging_dir
+      / 'test_app'
+      / '.adk'
+      / 'eval_history'
+      / 'test_app_single.test_123.5.evalset_result.json'
+  )
+  staged.parent.mkdir(parents=True)
+  staged.write_text('{"second": true}', encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert json.loads(existing.read_text(encoding='utf-8')) == {'first': True}
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == {'second': True}
+  assert not staging_dir.exists()
+  leftover_names = sorted(p.name for p in history_dir.iterdir())
+  assert leftover_names == sorted([existing.name, duplicate.name])
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch
