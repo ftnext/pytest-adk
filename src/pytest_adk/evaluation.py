@@ -235,7 +235,17 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
       return
     payload['eval_set_result_id'] = stem
     payload['eval_set_result_name'] = stem
-    path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    # ``path`` is the only copy of this result, so it is never written in
+    # place: the aligned document goes to a staging-local sibling and lands
+    # via atomic replace. If that fails (disk full, ...), the original moves
+    # on unaligned rather than risking corruption.
+    aligned = path.with_name('.aligning.tmp')
+    try:
+      aligned.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+      os.replace(aligned, path)
+    except OSError:
+      with contextlib.suppress(OSError):
+        aligned.unlink()
 
   @staticmethod
   def _publish_readable(saved: Path, history_dir: Path) -> None:

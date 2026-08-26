@@ -484,6 +484,50 @@ def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
   assert second['creation_timestamp'] == 123.5
 
 
+def test_failed_id_alignment_still_salvages_the_original(
+    tmp_path, monkeypatch
+) -> None:
+  """An id-alignment write failure must not corrupt or drop the only copy.
+
+  The aligned document is written to a staging-local sibling and lands via
+  atomic replace; when that write fails, the untouched original is still
+  moved (with its stale ids) instead of being lost or truncated.
+  """
+  original_write_text = Path.write_text
+
+  def failing_write_text(self, *args, **kwargs):
+    if self.name == '.aligning.tmp':
+      raise OSError('disk full')
+    return original_write_text(self, *args, **kwargs)
+
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  stem = name.removesuffix('.evalset_result.json')
+  existing = history_dir / name
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"marker": "first"}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  staged_document = {
+      'eval_set_result_id': stem,
+      'eval_set_result_name': stem,
+      'marker': 'second',
+  }
+  staged.write_text(json.dumps(staged_document), encoding='utf-8')
+  monkeypatch.setattr(Path, 'write_text', failing_write_text)
+
+  manager._salvage_staging(staging_dir)
+
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  # The original document survives byte-for-byte, stale ids and all.
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == staged_document
+  assert not staging_dir.exists()
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch
