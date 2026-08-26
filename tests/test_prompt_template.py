@@ -11,6 +11,7 @@ from google.genai import types
 
 import pytest_adk.evaluation as evaluation_module
 from pytest_adk.prompt_template import _expand_prompt_templates
+from pytest_adk.prompt_template import _split_marker_body
 
 
 def _eval_set_with_text(user_text: str, final_text: str | None = None) -> EvalSet:
@@ -91,6 +92,126 @@ def test_missing_prompt_file_raises(tmp_path) -> None:
     _expand_prompt_templates(eval_set, tmp_path)
 
 
+def test_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Turn on the ${ROOM} light.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text('<prompt:prompt.txt ROOM="living room">')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Turn on the living room light.'
+
+
+def test_single_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${MESSAGE}.', encoding='utf-8')
+  eval_set = _eval_set_with_text(
+      "<prompt:prompt.txt MESSAGE='こんにちは 世界'>"
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say こんにちは 世界.'
+
+
+def test_quoted_file_name_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'my prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:"my prompt.txt" VAR1=world>')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Hello world'
+
+
+def test_quoted_value_may_be_empty(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('[${VAR1}]', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1="">')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == '[]'
+
+
+def test_backslashes_in_values_are_literal(tmp_path) -> None:
+  # Splitting must not apply POSIX escaping: a backslash that used to survive
+  # str.split() (a regex, a Windows-style path) still reaches the template.
+  (tmp_path / 'prompt.txt').write_text(
+      'Match ${PATTERN} in ${WIN_PATH}.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text(
+      r'<prompt:prompt.txt PATTERN=\d+ WIN_PATH=C:\dir\file.txt>'
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == r'Match \d+ in C:\dir\file.txt.'
+
+
+def test_backslashes_in_file_name_are_literal() -> None:
+  # Asserted on the splitter rather than on the resolved path: whether
+  # ``subdir\prompt.txt`` names one file or two directories is a platform
+  # question, but the marker must reach ``Path`` with its backslash intact.
+  assert _split_marker_body(r'subdir\prompt.txt VAR1=world') == [
+      r'subdir\prompt.txt',
+      'VAR1=world',
+  ]
+
+
+def test_apostrophe_in_unquoted_value_is_literal(tmp_path) -> None:
+  # Quotes delimit only the quoted forms; one inside an unquoted token is an
+  # ordinary character, so ``MESSAGE=don't`` is not an unclosed quote.
+  (tmp_path / 'prompt.txt').write_text('${AUTHOR} says ${MESSAGE}', encoding='utf-8')
+  eval_set = _eval_set_with_text(
+      "<prompt:prompt.txt AUTHOR=O'Reilly's MESSAGE=don't>"
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == "O'Reilly's says don't"
+
+
+def test_quote_inside_unquoted_value_is_literal() -> None:
+  assert _split_marker_body('prompt.txt Q=say"hi" A=it\'s') == [
+      'prompt.txt',
+      'Q=say"hi"',
+      "A=it's",
+  ]
+
+
+def test_quotes_open_only_at_a_token_or_value_start() -> None:
+  # The two documented quoted forms: a quoted file name, and a quoted value
+  # right after ``=``.
+  assert _split_marker_body('"my prompt.txt" ROOM="living room" N=1') == [
+      'my prompt.txt',
+      'ROOM=living room',
+      'N=1',
+  ]
+
+
+def test_hash_in_value_is_not_a_comment(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Tag ${TAG} and ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt TAG=#hash VAR1=foo>')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Tag #hash and foo'
+
+
+def test_unbalanced_quote_raises(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1="unclosed>')
+
+  with pytest.raises(ValueError, match='quot'):
+    _expand_prompt_templates(eval_set, tmp_path)
+
+
 def test_invalid_assignment_raises(tmp_path) -> None:
   (tmp_path / 'prompt.txt').write_text('${VAR1}', encoding='utf-8')
   eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1>')
@@ -146,6 +267,37 @@ def test_toml_evalset_is_expanded_via_loader(tmp_path) -> None:
 
   text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
   assert text == 'Please turn on the living light.'
+
+
+_QUOTED_TOML_EVALSET = """\
+eval_set_id = "home_automation"
+
+[[eval_cases]]
+eval_id = "turn_on_living_room"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = '<prompt:prompt.txt ROOM="living room">' } ]
+"""
+
+
+def test_toml_evalset_with_quoted_value_is_expanded_via_loader(
+    tmp_path,
+) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Please turn on the ${ROOM} light.', encoding='utf-8'
+  )
+  test_file = tmp_path / 'cases.test.toml'
+  test_file.write_text(_QUOTED_TOML_EVALSET, encoding='utf-8')
+
+  eval_set = evaluation_module._load_eval_set_from_toml(test_file)
+  _expand_prompt_templates(eval_set, test_file.parent)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Please turn on the living room light.'
 
 
 def test_jinja_engine_expands_double_brace_placeholders(tmp_path) -> None:
