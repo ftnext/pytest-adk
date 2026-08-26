@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -158,9 +160,60 @@ async def test_agent_evaluator_saves_single_file(
   assert result is None
   saved_files = _saved_result_files(AgentEvaluator.results_dir)
   assert len(saved_files) == 1
-  saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
+  saved_file = saved_files[0]
+  saved_stem = saved_file.name.removesuffix('.evalset_result.json')
+  assert re.fullmatch(r'test_app_single\.test_\d{8}-\d{6}', saved_stem)
+  saved_result = json.loads(saved_file.read_text(encoding='utf-8'))
   assert saved_result['eval_set_id'] == 'single.test'
   assert len(saved_result['eval_case_results']) == 1
+  assert saved_result['eval_set_result_id'] == saved_stem
+  assert saved_result['eval_set_result_name'] == saved_stem
+  assert isinstance(saved_result['creation_timestamp'], float)
+
+
+def test_same_second_saves_keep_every_result_file(tmp_path, monkeypatch) -> None:
+  """Concurrent-style saves in the same local second must not overwrite.
+
+  The datetime is frozen so both saves compute the same ``YYYYMMDD-HHMMSS``
+  stem; the second save must claim the ``-2`` name instead of replacing the
+  first file.
+  """
+
+  class _FrozenDatetime:
+    @staticmethod
+    def now() -> datetime:
+      return datetime(2026, 8, 26, 12, 34, 56)
+
+  monkeypatch.setattr(evaluation_module, 'datetime', _FrozenDatetime)
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case2')]
+  )
+
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  # iterdir(), not the suffix glob: also proves no leftovers survive the
+  # rename (no unix-timestamp originals, no ``.tmp`` intermediates).
+  assert sorted(p.name for p in history_dir.iterdir()) == [
+      'test_app_single.test_20260826-123456-2.evalset_result.json',
+      'test_app_single.test_20260826-123456.evalset_result.json',
+  ]
+  saved_files = _saved_result_files(tmp_path)
+  saved_eval_ids = set()
+  for saved_file in saved_files:
+    payload = json.loads(saved_file.read_text(encoding='utf-8'))
+    stem = saved_file.name.removesuffix('.evalset_result.json')
+    assert payload['eval_set_result_id'] == stem
+    assert payload['eval_set_result_name'] == stem
+    saved_eval_ids.update(
+        case['eval_id'] for case in payload['eval_case_results']
+    )
+  assert saved_eval_ids == {'case1', 'case2'}
 
 
 @pytest.mark.asyncio

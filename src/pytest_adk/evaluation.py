@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -36,6 +39,95 @@ _NUM_RUNS = 2
 # Subpath that ADK's LocalEvalSetResultsManager writes ``*.evalset_result.json``
 # files into, relative to ``{results_dir}/{app_name}/``.
 _ADK_EVAL_HISTORY_SUBDIR = Path('.adk') / 'eval_history'
+
+_RESULT_FILE_SUFFIX = '.evalset_result.json'
+_UNIX_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d+\.\d+$')
+_LOCAL_DATETIME_FORMAT = '%Y%m%d-%H%M%S'
+
+
+class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
+  """LocalEvalSetResultsManager that names files by local datetime.
+
+  ADK names each result file ``{app}_{eval_set}_{time.time()}`` (a bare unix
+  float). This renames the just-written file so the timestamp component reads
+  as local ``YYYYMMDD-HHMMSS``, keeping ADK's ``.evalset_result.json`` suffix
+  so ``list_eval_set_results`` / ``get_eval_set_result`` / ``adk web`` still
+  discover it. If ADK's naming ever changes shape, the rename is skipped and
+  ADK's own name stands.
+  """
+
+  def __init__(self, agents_dir: str) -> None:
+    super().__init__(agents_dir=agents_dir)
+    # Own attribute rather than the parent's private ``_agents_dir``.
+    self._results_root = agents_dir
+
+  def save_eval_set_result(
+      self,
+      app_name: str,
+      eval_set_id: str,
+      eval_case_results: list[EvalCaseResult],
+  ) -> None:
+    """Saves via ADK, then renames the file to a local-datetime stem.
+
+    Args:
+        app_name: ADK app name; also the results subdirectory.
+        eval_set_id: The evalset's id, embedded in the saved filename.
+        eval_case_results: Results to persist, forwarded to ADK unchanged.
+    """
+    history_dir = Path(self._results_root) / app_name / _ADK_EVAL_HISTORY_SUBDIR
+    pattern = '*' + _RESULT_FILE_SUFFIX
+    before = set(history_dir.glob(pattern)) if history_dir.is_dir() else set()
+    super().save_eval_set_result(
+        app_name=app_name,
+        eval_set_id=eval_set_id,
+        eval_case_results=eval_case_results,
+    )
+    created = set(history_dir.glob(pattern)) - before
+    if len(created) != 1:
+      return
+    saved = created.pop()
+    base, replaced = _UNIX_TIMESTAMP_SUFFIX_RE.subn(
+        '', saved.name.removesuffix(_RESULT_FILE_SUFFIX)
+    )
+    if replaced != 1:
+      return
+    stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
+    counter = 1
+    while True:
+      numbering = '' if counter == 1 else f'-{counter}'
+      target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
+      try:
+        # link() atomically claims the name -- a concurrent save (another
+        # process writing the same app/eval set in the same second) gets
+        # FileExistsError and moves on to the next counter instead of
+        # silently overwriting this result -- and publishes the complete
+        # ADK-written document in the same step, so no empty or partial
+        # file ever appears under a ``*.evalset_result.json`` name, even if
+        # this process dies mid-save.
+        os.link(saved, target)
+      except FileExistsError:
+        counter += 1
+        continue
+      except OSError:
+        # Filesystem without hard-link support: keep ADK's unix-timestamp
+        # name rather than fall back to a rename that could race a
+        # concurrent save.
+        return
+      break
+    saved.unlink()
+    # Keep the embedded id in step with the filename. creation_timestamp is
+    # deliberately left as the raw unix float: adk web compares it to find
+    # the most recent run for an eval set. The rewrite goes through a
+    # non-discoverable ``.tmp`` name and an atomic replace, so readers only
+    # ever see a complete document under the published name.
+    payload = json.loads(target.read_text(encoding='utf-8'))
+    if isinstance(payload, dict):
+      new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
+      payload['eval_set_result_id'] = new_stem
+      payload['eval_set_result_name'] = new_stem
+      rewritten = target.with_name(target.name + '.tmp')
+      rewritten.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+      os.replace(rewritten, target)
 
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
@@ -342,7 +434,7 @@ class _AgentEvaluator:
           )
       )
 
-      results_manager = LocalEvalSetResultsManager(
+      results_manager = _ReadableNameEvalSetResultsManager(
           agents_dir=os.fspath(self._results_dir)
       )
       all_eval_results: list[EvalCaseResult] = [
