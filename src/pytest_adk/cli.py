@@ -72,6 +72,7 @@ from google.adk.evaluation.local_eval_set_results_manager import (
 )
 
 from .evaluation import _collect_eval_sets
+from .evaluation import _ReadableNameEvalSetResultsManager
 from .metrics import build_metric_evaluator_registry
 from .metrics import check_criteria_have_evaluators
 from .metrics import check_custom_metrics_are_consistent
@@ -883,7 +884,9 @@ async def _run_eval(
     # mirrors pytest_adk.evaluation._AgentEvaluator, which sidesteps the same
     # skew by collecting every run's EvalCaseResult itself and calling
     # save_eval_set_result() exactly once per eval_set.
-    results_manager = LocalEvalSetResultsManager(agents_dir=args.results_dir)
+    results_manager = _ReadableNameEvalSetResultsManager(
+        agents_dir=args.results_dir
+    )
     service = RemoteEvalService(
         client,
         app_name=app_name,

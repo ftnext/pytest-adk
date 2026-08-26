@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -158,9 +162,513 @@ async def test_agent_evaluator_saves_single_file(
   assert result is None
   saved_files = _saved_result_files(AgentEvaluator.results_dir)
   assert len(saved_files) == 1
-  saved_result = json.loads(saved_files[0].read_text(encoding='utf-8'))
+  saved_file = saved_files[0]
+  saved_stem = saved_file.name.removesuffix('.evalset_result.json')
+  assert re.fullmatch(r'test_app_single\.test_\d{8}-\d{6}', saved_stem)
+  saved_result = json.loads(saved_file.read_text(encoding='utf-8'))
   assert saved_result['eval_set_id'] == 'single.test'
   assert len(saved_result['eval_case_results']) == 1
+  assert saved_result['eval_set_result_id'] == saved_stem
+  assert saved_result['eval_set_result_name'] == saved_stem
+  assert isinstance(saved_result['creation_timestamp'], float)
+
+
+def test_same_second_saves_keep_every_result_file(tmp_path, monkeypatch) -> None:
+  """Concurrent-style saves in the same local second must not overwrite.
+
+  The datetime is frozen so both saves compute the same ``YYYYMMDD-HHMMSS``
+  stem; the second save must claim the ``-2`` name instead of replacing the
+  first file.
+  """
+
+  class _FrozenDatetime:
+    @staticmethod
+    def now() -> datetime:
+      return datetime(2026, 8, 26, 12, 34, 56)
+
+  monkeypatch.setattr(evaluation_module, 'datetime', _FrozenDatetime)
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case2')]
+  )
+
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  # iterdir(), not the suffix glob: also proves no leftovers survive the
+  # rename (no unix-timestamp originals, no ``.tmp`` intermediates).
+  assert sorted(p.name for p in history_dir.iterdir()) == [
+      'test_app_single.test_20260826-123456-2.evalset_result.json',
+      'test_app_single.test_20260826-123456.evalset_result.json',
+  ]
+  saved_files = _saved_result_files(tmp_path)
+  saved_eval_ids = set()
+  for saved_file in saved_files:
+    payload = json.loads(saved_file.read_text(encoding='utf-8'))
+    stem = saved_file.name.removesuffix('.evalset_result.json')
+    assert payload['eval_set_result_id'] == stem
+    assert payload['eval_set_result_name'] == stem
+    saved_eval_ids.update(
+        case['eval_id'] for case in payload['eval_case_results']
+    )
+  assert saved_eval_ids == {'case1', 'case2'}
+
+
+def test_save_identifies_its_own_file_despite_concurrent_writers(
+    tmp_path, monkeypatch
+) -> None:
+  """A file landing concurrently in the shared dir must not derail the save.
+
+  The save stages through a private directory, so another writer completing
+  mid-save can neither be mistaken for our output nor make our file count
+  ambiguous; our result still gets the readable name and the foreign file is
+  left alone.
+  """
+
+  class _FrozenDatetime:
+    @staticmethod
+    def now() -> datetime:
+      return datetime(2026, 8, 26, 12, 34, 56)
+
+  monkeypatch.setattr(evaluation_module, 'datetime', _FrozenDatetime)
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  foreign = history_dir / 'test_app_single.test_1756180000.5.evalset_result.json'
+  original_save = evaluation_module.LocalEvalSetResultsManager.save_eval_set_result
+
+  def racing_save(self, *, app_name, eval_set_id, eval_case_results):
+    original_save(
+        self,
+        app_name=app_name,
+        eval_set_id=eval_set_id,
+        eval_case_results=eval_case_results,
+    )
+    # Simulates another process completing its own save into the shared
+    # history directory while this save is still in flight.
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text('{}', encoding='utf-8')
+
+  monkeypatch.setattr(
+      evaluation_module.LocalEvalSetResultsManager,
+      'save_eval_set_result',
+      racing_save,
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  assert sorted(p.name for p in history_dir.iterdir()) == [
+      'test_app_single.test_1756180000.5.evalset_result.json',
+      'test_app_single.test_20260826-123456.evalset_result.json',
+  ]
+
+
+def test_failed_readable_publish_falls_back_to_adk_names(
+    tmp_path, monkeypatch
+) -> None:
+  """When the readable-name path fails, the result must still be published.
+
+  The fallback uses ADK's own unix-timestamp name, whose embedded ids
+  already match, so the filename/id invariant holds on the failure path too.
+  """
+
+  def _refuse_publish(saved, history_dir):
+    raise OSError('simulated hard-link failure')
+
+  monkeypatch.setattr(
+      evaluation_module._ReadableNameEvalSetResultsManager,
+      '_publish_readable',
+      staticmethod(_refuse_publish),
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  files = list(history_dir.iterdir())
+  assert len(files) == 1
+  saved_file = files[0]
+  stem = saved_file.name.removesuffix('.evalset_result.json')
+  assert re.fullmatch(r'test_app_single\.test_\d+\.\d+', stem)
+  payload = json.loads(saved_file.read_text(encoding='utf-8'))
+  assert payload['eval_set_result_id'] == stem
+  assert payload['eval_set_result_name'] == stem
+
+
+def test_unrecognized_adk_output_is_preserved_not_deleted(
+    tmp_path, monkeypatch
+) -> None:
+  """A future ADK output format must be salvaged into the real tree, not lost.
+
+  If ADK ever changes its result filename or layout, the staging cleanup
+  must relocate whatever was written to the same relative path under the
+  real results root instead of deleting it with the staging directory.
+  """
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  original_save = evaluation_module.LocalEvalSetResultsManager.save_eval_set_result
+
+  def format_changed_save(self, *, app_name, eval_set_id, eval_case_results):
+    original_save(
+        self,
+        app_name=app_name,
+        eval_set_id=eval_set_id,
+        eval_case_results=eval_case_results,
+    )
+    # Simulates ADK adopting a different result-file extension: the staged
+    # file no longer matches what the readable-name path recognizes.
+    staged = list(history_dir.glob('.staging-*/**/*.evalset_result.json'))
+    assert len(staged) == 1
+    staged[0].rename(staged[0].with_suffix('.changed'))
+
+  monkeypatch.setattr(
+      evaluation_module.LocalEvalSetResultsManager,
+      'save_eval_set_result',
+      format_changed_save,
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  names = [p.name for p in history_dir.iterdir()]
+  assert len(names) == 1
+  assert re.fullmatch(
+      r'test_app_single\.test_\d+\.\d+\.evalset_result\.changed', names[0]
+  )
+
+
+def test_salvage_keeps_result_when_destination_name_is_taken(tmp_path) -> None:
+  """A taken salvage destination must dedupe, never drop this save's data."""
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  existing = history_dir / 'test_app_single.test_123.5.evalset_result.json'
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"first": true}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = (
+      staging_dir
+      / 'test_app'
+      / '.adk'
+      / 'eval_history'
+      / 'test_app_single.test_123.5.evalset_result.json'
+  )
+  staged.parent.mkdir(parents=True)
+  staged.write_text('{"second": true}', encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert json.loads(existing.read_text(encoding='utf-8')) == {'first': True}
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == {'second': True}
+  assert not staging_dir.exists()
+
+
+def test_salvage_without_hard_links_leaves_no_empty_results(
+    tmp_path, monkeypatch
+) -> None:
+  """The no-hard-link fallback must not stage empty files at result names.
+
+  The exclusive-create claim goes to a hidden ``.lock`` name, so no
+  ``*.evalset_result.json`` name ever exists without its full content;
+  collisions still dedupe with ``-2``, and the lock of a published name is
+  kept as a permanent claim (invisible to suffix-based discovery) so no
+  later mover can race an overwrite onto it.
+  """
+
+  def _no_hard_links(src, dst, **kwargs):
+    raise OSError('hard links not supported')
+
+  monkeypatch.setattr(evaluation_module.os, 'link', _no_hard_links)
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  existing = history_dir / 'test_app_single.test_123.5.evalset_result.json'
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"first": true}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = (
+      staging_dir
+      / 'test_app'
+      / '.adk'
+      / 'eval_history'
+      / 'test_app_single.test_123.5.evalset_result.json'
+  )
+  staged.parent.mkdir(parents=True)
+  staged.write_text('{"second": true}', encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert json.loads(existing.read_text(encoding='utf-8')) == {'first': True}
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == {'second': True}
+  assert not staging_dir.exists()
+  leftover_names = sorted(p.name for p in history_dir.iterdir())
+  assert leftover_names == sorted(
+      [existing.name, duplicate.name, f'.{duplicate.name}.lock']
+  )
+  # The permanent claim never shadows a result: suffix-based discovery
+  # (how ADK lists eval history) sees exactly the two real files.
+  discovered = sorted(
+      p.name for p in history_dir.glob('*.evalset_result.json')
+  )
+  assert discovered == sorted([existing.name, duplicate.name])
+
+
+def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
+  """A deduplicated result document must identify itself by its new stem.
+
+  Without the rewrite, the ``-2`` file would still carry the preexisting
+  file's ids, so an ADK lookup by the listed stem could return the wrong
+  result. The rewrite happens in staging, before the atomic publish.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  stem = name.removesuffix('.evalset_result.json')
+  existing = history_dir / name
+  existing.parent.mkdir(parents=True)
+  existing.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': stem,
+              'eval_set_result_name': stem,
+              'creation_timestamp': 123.5,
+              'marker': 'first',
+          }
+      ),
+      encoding='utf-8',
+  )
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': stem,
+              'eval_set_result_name': stem,
+              'creation_timestamp': 123.5,
+              'marker': 'second',
+          }
+      ),
+      encoding='utf-8',
+  )
+
+  manager._salvage_staging(staging_dir)
+
+  first = json.loads(existing.read_text(encoding='utf-8'))
+  assert first['marker'] == 'first'
+  assert first['eval_set_result_id'] == stem
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  second = json.loads(duplicate.read_text(encoding='utf-8'))
+  duplicate_stem = duplicate.name.removesuffix('.evalset_result.json')
+  assert second['marker'] == 'second'
+  assert second['eval_set_result_id'] == duplicate_stem
+  assert second['eval_set_result_name'] == duplicate_stem
+  assert second['creation_timestamp'] == 123.5
+
+
+def test_failed_id_alignment_still_salvages_the_original(
+    tmp_path, monkeypatch
+) -> None:
+  """An id-alignment write failure must not corrupt or drop the only copy.
+
+  The aligned document is written to a staging-local sibling and lands via
+  atomic replace; when that write fails, the untouched original is still
+  moved (with its stale ids) instead of being lost or truncated.
+  """
+  original_write_text = Path.write_text
+
+  def failing_write_text(self, *args, **kwargs):
+    if self.name == '.aligning.tmp':
+      raise OSError('disk full')
+    return original_write_text(self, *args, **kwargs)
+
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  stem = name.removesuffix('.evalset_result.json')
+  existing = history_dir / name
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"marker": "first"}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  staged_document = {
+      'eval_set_result_id': stem,
+      'eval_set_result_name': stem,
+      'marker': 'second',
+  }
+  staged.write_text(json.dumps(staged_document), encoding='utf-8')
+  monkeypatch.setattr(Path, 'write_text', failing_write_text)
+
+  manager._salvage_staging(staging_dir)
+
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  # The original document survives byte-for-byte, stale ids and all.
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == staged_document
+  assert not staging_dir.exists()
+
+
+def test_recovery_quarantines_truncated_results(tmp_path) -> None:
+  """A partial document must never become discoverable, only preserved.
+
+  Elapsed time is no proof of completeness: a process killed mid-write
+  leaves truncated JSON that would otherwise pass the age check and be
+  served by ADK as a corrupt result. It is published under a quarantined
+  ``.invalid`` name instead -- kept for inspection, invisible to
+  suffix-based discovery.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  truncated = '{"eval_set_id": "single.test", "creation_'
+  staged.write_text(truncated, encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert list(history_dir.glob('*.evalset_result.json')) == []
+  quarantined = history_dir / f'{name}.invalid'
+  assert quarantined.read_text(encoding='utf-8') == truncated
+  assert not staging_dir.exists()
+
+
+def test_recovery_skips_original_with_publication_proof(tmp_path) -> None:
+  """A hard-link-proven published save is not republished by recovery.
+
+  Dying between the readable publish and the staged original's unlink
+  leaves the original behind next to the publishable working copy, whose
+  link count (shared inode with the published file) is physical proof the
+  save reached history. Only then may recovery skip the original.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
+  readable_stem = readable_name.removesuffix('.evalset_result.json')
+  document = {
+      'eval_set_result_id': readable_stem,
+      'eval_set_result_name': readable_stem,
+      'eval_set_id': 'single.test',
+      'creation_timestamp': 111.5,
+  }
+  published = history_dir / readable_name
+  published.parent.mkdir(parents=True)
+  published.write_text(json.dumps(document), encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  original_name = 'test_app_single.test_111.5.evalset_result.json'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(json.dumps(document), encoding='utf-8')
+  # The crash left the publishable working copy hard-linked to the
+  # published file -- exactly what a successful os.link publish produces.
+  os.link(published, staged.with_name('.publishable.tmp'))
+
+  manager._salvage_staging(staging_dir)
+
+  assert [p.name for p in history_dir.iterdir()] == [readable_name]
+  assert not staging_dir.exists()
+
+
+def test_recovery_salvages_identical_content_without_proof(tmp_path) -> None:
+  """Content equality alone must never hide or drop a staged result.
+
+  A deterministic eval plus a coarse clock can make two distinct runs
+  byte-identical, so without the hard-link publication proof the staged
+  original is salvaged normally -- history then rightly lists two runs.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
+  published = history_dir / readable_name
+  published.parent.mkdir(parents=True)
+  content = {
+      'eval_set_id': 'single.test',
+      'creation_timestamp': 111.5,
+      'eval_case_results': ['identical-run'],
+  }
+  published.write_text(json.dumps(content), encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  original_name = 'test_app_single.test_111.5.evalset_result.json'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(json.dumps(content), encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  discovered = sorted(
+      p.name for p in history_dir.glob('*.evalset_result.json')
+  )
+  assert discovered == sorted([readable_name, original_name])
+  assert not staging_dir.exists()
+
+
+def test_abandoned_staging_is_recovered_but_live_staging_is_not(
+    tmp_path,
+) -> None:
+  """Results stranded by a killed process must find their way back.
+
+  A staging directory quiet for longer than the recovery age is salvaged
+  into history; a fresh one -- possibly a save still in flight -- is left
+  untouched so a partial document is never published.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  abandoned = history_dir / '.staging-abandoned'
+  abandoned_file = abandoned / 'test_app' / '.adk' / 'eval_history' / name
+  abandoned_file.parent.mkdir(parents=True)
+  abandoned_file.write_text('{"marker": "abandoned"}', encoding='utf-8')
+  stale = time.time() - 2 * evaluation_module._STAGING_RECOVERY_AGE_SECONDS
+  for path in (abandoned, *abandoned.rglob('*')):
+    os.utime(path, (stale, stale))
+  live = history_dir / '.staging-live'
+  live_file = live / 'test_app' / '.adk' / 'eval_history' / name
+  live_file.parent.mkdir(parents=True)
+  live_file.write_text('{"marker": "live"}', encoding='utf-8')
+
+  manager._recover_abandoned_staging(history_dir)
+
+  recovered = history_dir / name
+  assert json.loads(recovered.read_text(encoding='utf-8')) == {
+      'marker': 'abandoned'
+  }
+  assert not abandoned.exists()
+  # The claimed intermediate name is gone too: only the live directory's
+  # staging entry remains.
+  assert [p.name for p in history_dir.glob('.staging-*')] == ['.staging-live']
+  # The fresh directory might belong to a save in flight: untouched.
+  assert json.loads(live_file.read_text(encoding='utf-8')) == {'marker': 'live'}
 
 
 @pytest.mark.asyncio
