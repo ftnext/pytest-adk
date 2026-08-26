@@ -9,10 +9,13 @@ Import constraint: unlike ``client.py``, this module *does* need
 reusing ``LocalEvalService.evaluate()``. On google-adk v2, importing that
 module transitively imports ``metric_evaluator_registry``, whose default
 registry construction pulls in ``vertexai`` (google-cloud-aiplatform) even
-though this module never talks to Vertex AI. The import is therefore guarded
-below with a clear error message instead of a bare ``ModuleNotFoundError``,
-mirroring ``google.adk.evaluation.agent_evaluator``'s own
-``MISSING_EVAL_DEPENDENCIES_MESSAGE`` pattern.
+though this module never talks to Vertex AI. pytest-adk itself declares
+``google-cloud-aiplatform`` as a normal dependency (see ``pyproject.toml``)
+precisely so this import succeeds out of the box; the guard below -- a clear
+error message instead of a bare ``ModuleNotFoundError``, mirroring
+``google.adk.evaluation.agent_evaluator``'s own
+``MISSING_EVAL_DEPENDENCIES_MESSAGE`` pattern -- is a defensive fallback for
+an environment where pytest-adk's own dependencies were not fully installed.
 """
 
 from __future__ import annotations
@@ -41,13 +44,14 @@ from .client import AdkApiClient
 _MISSING_EVAL_DEPENDENCIES_MESSAGE = (
     "Remote evaluation (pytest_adk.remote.eval_service) reuses"
     " google.adk.evaluation.local_eval_service.LocalEvalService for scoring,"
-    ' which requires google-adk\'s `eval` extra: `pip install "google-adk'
-    '[eval]"`. On google-adk v2, `LocalEvalService`\'s import chain'
-    " additionally requires `vertexai` (google-cloud-aiplatform) purely as an"
+    " which requires a dependency pytest-adk itself declares:"
+    " google-cloud-aiplatform. On google-adk v2, `LocalEvalService`'s import"
+    " chain requires `vertexai` (from google-cloud-aiplatform) purely as an"
     " import-time side effect of its default metric registry -- this module"
-    " never calls Vertex AI. If pytest-adk's own dependencies are already"
-    " installed, adding the base `google-cloud-aiplatform` package on top is"
-    " therefore sufficient without pulling in the rest of the `eval` extra."
+    " never calls Vertex AI. This error means pytest-adk's own declared"
+    " dependencies are not fully installed in this environment; reinstalling"
+    " pytest-adk (`pip install --force-reinstall pytest-adk` or equivalent)"
+    " should resolve it."
 )
 
 try:

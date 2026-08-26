@@ -402,15 +402,16 @@ with exit `2` rather than silently scoring one evalset with the other's
 metric. Rename the metric, make the definitions identical, or evaluate the
 evalsets in separate runs.
 
-### Dependencies on google-adk v2
+### google-adk v1 and v2 dependencies
 
-pytest-adk ships a minimal subset of google-adk's `eval` extra (`pandas`,
-`rouge-score`, `tabulate`) as normal dependencies, which is enough to run
-evaluations on google-adk v1. On google-adk v2, ADK's evaluation import chain
-additionally requires the `vertexai` module even though remote evaluation
-never talks to Vertex AI; install the base `google-cloud-aiplatform` package
-(or `google-adk[eval]`) to run `pytest-adk eval` there. Without it, the
-command prints a clear error instead of a traceback.
+pytest-adk ships the minimal subset of google-adk's `eval` extra (`pandas`,
+`rouge-score`, `tabulate`) as normal dependencies instead of the full extra,
+which pulls in heavyweight packages such as `gepa`. On google-adk v2, ADK's
+evaluation import chain additionally requires the `vertexai` module even
+though pytest-adk never talks to Vertex AI itself, so `google-cloud-aiplatform`
+is a normal dependency too. google-adk v1 already depends on
+`google-cloud-aiplatform`, so this only adds packages for v2 users. Either
+way, nothing extra needs installing to run `pytest-adk eval`.
 
 ### Limitations
 

@@ -26,13 +26,18 @@ dependencies = [
     # response_match_score requires rouge-score; detailed result tables
     # require tabulate). The full [eval] extra is avoided because it pulls in
     # heavyweight dependencies such as gepa and
-    # google-cloud-aiplatform[evaluation]. Note: on google-adk v2, importing
-    # LocalEvalService additionally requires google-cloud-aiplatform (base is
-    # enough); pytest-adk does not force it on users and surfaces google-adk's
-    # own guidance instead.
+    # google-cloud-aiplatform[evaluation].
     "pandas>=2.2.3",
     "rouge-score>=0.1.2",
     "tabulate>=0.9",
+    # On google-adk v2, LocalEvalService's import chain imports `vertexai` as
+    # an import-time side effect of building the default metric registry,
+    # even though pytest-adk never calls Vertex AI itself. google-adk v1
+    # already depends on `google-cloud-aiplatform[agent-engines]>=1.148.1,<2`,
+    # so this only adds packages for v2 users; the base package is enough (the
+    # `[evaluation]` extra is not needed). Floor and cap match google-adk's
+    # own bounds.
+    "google-cloud-aiplatform>=1.148.1,<2",
     'tomli; python_version < "3.11"',
     "tomli-w",
 ]
@@ -45,10 +50,6 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "jinja2",
-    # google-adk v2's LocalEvalService import chain needs the vertexai module
-    # (base google-cloud-aiplatform), so tests that run real evaluations
-    # require it. Not a runtime dependency of pytest-adk itself.
-    "google-cloud-aiplatform",
 ]
 
 [project.scripts]
@@ -81,7 +82,6 @@ dependencies = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "google-adk>=2,<3",
-    "google-cloud-aiplatform",
 ]
 [tool.hatch.envs.test-adk2.scripts]
 run = "pytest {args}"
