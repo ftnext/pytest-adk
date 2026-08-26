@@ -1151,6 +1151,74 @@ def _find_duplicate_eval_set_id(
   return None
 
 
+_ANSI_GREEN = '\x1b[32m'
+_ANSI_RED = '\x1b[31m'
+_ANSI_RESET = '\x1b[0m'
+
+
+def _enable_windows_vt_processing(stream) -> bool:
+  """Turns on ANSI interpretation for ``stream``'s Windows console, if it can.
+
+  A legacy Windows console reports ``isatty() == True`` yet renders raw ANSI
+  escapes as mojibake unless ENABLE_VIRTUAL_TERMINAL_PROCESSING has been set
+  on its handle, so colorizing is only safe once this succeeds. Modern
+  terminals (Windows Terminal, ConEmu, ...) either preset the flag or accept
+  it being set here.
+
+  Returns:
+      ``True`` if the console interprets ANSI sequences (the flag was already
+      set or was set successfully), ``False`` otherwise -- including on
+      non-Windows platforms, where the required modules do not exist.
+  """
+  try:
+    import ctypes
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    kernel32 = ctypes.windll.kernel32
+    mode = ctypes.c_uint32()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+      return False
+    enable_virtual_terminal_processing = 0x0004
+    if mode.value & enable_virtual_terminal_processing:
+      return True
+    return bool(
+        kernel32.SetConsoleMode(
+            handle, mode.value | enable_virtual_terminal_processing
+        )
+    )
+  except Exception:  # noqa: BLE001 - any failure means "don't emit ANSI"
+    return False
+
+
+def _colorize(text: str, color: str, *, stream) -> str:
+  """Wraps ``text`` in an ANSI color code if ``stream`` looks like a color-capable tty.
+
+  Colorizing is skipped (returning ``text`` unchanged) when ``stream`` is not a
+  tty (e.g. piped output, or pytest's ``capsys``), when ``NO_COLOR`` is set
+  (see https://no-color.org), when ``TERM=dumb``, or on a Windows console
+  whose virtual-terminal processing cannot be enabled (a legacy console shows
+  literal escape characters otherwise). No new dependency is introduced for
+  this -- raw ANSI escape codes are used directly.
+
+  Args:
+      text: The text to colorize.
+      color: One of the ``_ANSI_*`` color constants.
+      stream: The stream ``text`` is about to be printed to; its ``isatty()``
+          is what gates colorization, since stdout and stderr can differ.
+  """
+  isatty = getattr(stream, 'isatty', None)
+  if not callable(isatty) or not isatty():
+    return text
+  if os.environ.get('NO_COLOR'):
+    return text
+  if os.environ.get('TERM') == 'dumb':
+    return text
+  if os.name == 'nt' and not _enable_windows_vt_processing(stream):
+    return text
+  return f'{color}{text}{_ANSI_RESET}'
+
+
 async def _run_and_evaluate_eval_set(
     service,
     results_manager: LocalEvalSetResultsManager,
@@ -1213,8 +1281,9 @@ async def _run_and_evaluate_eval_set(
       success_results.append(inference_result)
     else:
       had_inference_failure = True
+      prefix = _colorize('INFERENCE FAILED', _ANSI_RED, stream=sys.stderr)
       print(
-          f"INFERENCE FAILED for eval set '{eval_set.eval_set_id}' eval case"
+          f"{prefix} for eval set '{eval_set.eval_set_id}' eval case"
           f" '{inference_result.eval_case_id}': {inference_result.error_message}",
           file=sys.stderr,
       )
@@ -1274,11 +1343,14 @@ def _print_eval_case_result(
     if metric_passed and not print_detailed_results:
       continue
     status_label = 'PASSED' if metric_passed else metric_result.eval_status.name
+    target_stream = sys.stdout if metric_passed else sys.stderr
+    color = _ANSI_GREEN if metric_passed else _ANSI_RED
+    status_label = _colorize(status_label, color, stream=target_stream)
     print(
         f'[{eval_case_result.eval_id}] {metric_result.metric_name}:'
         f' score={metric_result.score} threshold={metric_result.threshold}'
         f' status={status_label}',
-        file=sys.stdout if metric_passed else sys.stderr,
+        file=target_stream,
     )
   return case_failed
 

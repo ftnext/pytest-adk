@@ -92,6 +92,111 @@ def _transport_for(server: FakeApiServer) -> httpx.ASGITransport:
   return httpx.ASGITransport(app=server.build_app())
 
 
+class _FakeStream:
+  """A minimal stdout/stderr stand-in with a controllable ``isatty()``.
+
+  ``print()`` only needs ``.write()``; ``.isatty()`` is what
+  ``cli_module._colorize`` gates on, which is why a real file-like object is
+  not enough here -- capsys's captured streams always report as non-ttys.
+  """
+
+  def __init__(self, is_tty: bool) -> None:
+    self._is_tty = is_tty
+    self.written: list[str] = []
+
+  def write(self, s: str) -> None:
+    self.written.append(s)
+
+  def flush(self) -> None:
+    pass
+
+  def isatty(self) -> bool:
+    return self._is_tty
+
+  def getvalue(self) -> str:
+    return ''.join(self.written)
+
+
+def test_colorize_wraps_text_in_ansi_codes_when_stream_is_a_tty(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  stream = _FakeStream(is_tty=True)
+
+  result = cli_module._colorize('PASSED', cli_module._ANSI_GREEN, stream=stream)
+
+  assert result == f'{cli_module._ANSI_GREEN}PASSED{cli_module._ANSI_RESET}'
+
+
+def test_colorize_leaves_text_plain_when_stream_is_not_a_tty(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  stream = _FakeStream(is_tty=False)
+
+  assert cli_module._colorize('PASSED', cli_module._ANSI_GREEN, stream=stream) == 'PASSED'
+
+
+def test_colorize_respects_no_color_env_var_even_on_a_tty(monkeypatch) -> None:
+  monkeypatch.setenv('NO_COLOR', '1')
+  stream = _FakeStream(is_tty=True)
+
+  assert cli_module._colorize('FAILED', cli_module._ANSI_RED, stream=stream) == 'FAILED'
+
+
+def test_colorize_respects_dumb_term_even_on_a_tty(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'dumb')
+  stream = _FakeStream(is_tty=True)
+
+  assert cli_module._colorize('FAILED', cli_module._ANSI_RED, stream=stream) == 'FAILED'
+
+
+def test_colorize_suppressed_on_windows_when_vt_cannot_be_enabled(
+    monkeypatch,
+) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  monkeypatch.setattr(cli_module.os, 'name', 'nt')
+  monkeypatch.setattr(
+      cli_module, '_enable_windows_vt_processing', lambda stream: False
+  )
+  stream = _FakeStream(is_tty=True)
+
+  assert cli_module._colorize('FAILED', cli_module._ANSI_RED, stream=stream) == 'FAILED'
+
+
+def test_colorize_colors_on_windows_once_vt_is_enabled(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  monkeypatch.setattr(cli_module.os, 'name', 'nt')
+  monkeypatch.setattr(
+      cli_module, '_enable_windows_vt_processing', lambda stream: True
+  )
+  stream = _FakeStream(is_tty=True)
+
+  result = cli_module._colorize('PASSED', cli_module._ANSI_GREEN, stream=stream)
+
+  assert result == f'{cli_module._ANSI_GREEN}PASSED{cli_module._ANSI_RESET}'
+
+
+def test_enable_windows_vt_processing_fails_soft_off_windows() -> None:
+  # On POSIX there is no msvcrt (and _FakeStream has no fileno); the helper
+  # must swallow that and report "no ANSI support" instead of raising.
+  assert (
+      cli_module._enable_windows_vt_processing(_FakeStream(is_tty=True))
+      is False
+  )
+
+
+def test_colorize_tolerates_a_stream_with_no_isatty_method(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+
+  class _NoIsatty:
+    pass
+
+  assert cli_module._colorize('PASSED', cli_module._ANSI_GREEN, stream=_NoIsatty()) == 'PASSED'
+
+
 def test_eval_happy_path_saves_results_and_prints_location(
     tmp_path, capsys
 ) -> None:
@@ -538,6 +643,109 @@ def test_eval_metric_failure_exits_one_and_reports_per_case_metric(
   err = capsys.readouterr().err
   assert 'weather_case' in err
   assert 'response_match_score' in err
+
+
+def test_passing_metric_status_is_colorized_green_when_stdout_is_a_tty(
+    tmp_path, monkeypatch
+) -> None:
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+  results_dir = tmp_path / 'results'
+
+  fake_stdout = _FakeStream(is_tty=True)
+  monkeypatch.setattr(cli_module.sys, 'stdout', fake_stdout)
+  monkeypatch.setattr(cli_module.sys, 'stderr', _FakeStream(is_tty=True))
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          '--print-detailed-results',
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 0
+  out = fake_stdout.getvalue()
+  assert f'{cli_module._ANSI_GREEN}PASSED{cli_module._ANSI_RESET}' in out
+
+
+def test_failing_metric_status_is_colorized_red_when_stderr_is_a_tty(
+    tmp_path, monkeypatch
+) -> None:
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+  results_dir = tmp_path / 'results'
+
+  fake_stderr = _FakeStream(is_tty=True)
+  monkeypatch.setattr(cli_module.sys, 'stdout', _FakeStream(is_tty=True))
+  monkeypatch.setattr(cli_module.sys, 'stderr', fake_stderr)
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 1
+  err = fake_stderr.getvalue()
+  assert f'{cli_module._ANSI_RED}FAILED{cli_module._ANSI_RESET}' in err
+
+
+def test_failing_metric_status_stays_plain_when_no_color_is_set(
+    tmp_path, monkeypatch
+) -> None:
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+  results_dir = tmp_path / 'results'
+
+  fake_stderr = _FakeStream(is_tty=True)
+  monkeypatch.setattr(cli_module.sys, 'stdout', _FakeStream(is_tty=True))
+  monkeypatch.setattr(cli_module.sys, 'stderr', fake_stderr)
+  monkeypatch.setenv('NO_COLOR', '1')
+
+  exit_code = main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+      ],
+      transport=_transport_for(server),
+  )
+
+  assert exit_code == 1
+  err = fake_stderr.getvalue()
+  assert 'status=FAILED' in err
+  assert cli_module._ANSI_RED not in err
 
 
 def test_app_name_omitted_resolves_when_exactly_one_app(tmp_path) -> None:
