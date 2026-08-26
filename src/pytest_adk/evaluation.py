@@ -189,11 +189,16 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
           # discovery, so ADK never serves a corrupt result.
           destination = destination.with_name(destination.name + '.invalid')
         elif self._already_published(destination.parent, payload):
-          # The readable copy reached history but the process died before
-          # the staged original was unlinked. Dropping the original is
-          # deduplication, not data loss: this exact result (same
-          # eval_set_id and creation_timestamp) is already discoverable.
-          continue
+          # The readable copy most likely reached history before the
+          # process died with the staged original still in place. But even
+          # full content equality cannot prove two documents are the same
+          # run -- a deterministic eval plus a coarse clock can produce
+          # identical distinct runs -- so nothing is deleted: the original
+          # is parked under a non-discoverable .duplicate name, off ADK's
+          # listing yet preserved byte-for-byte for a human to adjudicate.
+          destination = destination.with_name(
+              destination.name + '.duplicate'
+          )
       destination.parent.mkdir(parents=True, exist_ok=True)
       self._move_without_overwrite(path, destination)
     shutil.rmtree(staging_dir, ignore_errors=True)

@@ -558,15 +558,16 @@ def test_recovery_quarantines_truncated_results(tmp_path) -> None:
   assert not staging_dir.exists()
 
 
-def test_recovery_drops_original_of_an_already_published_result(
+def test_recovery_parks_already_published_original_as_duplicate(
     tmp_path,
 ) -> None:
-  """A staged original whose result already reached history is deduped.
+  """A staged original whose content already reached history is parked.
 
   Dying between the readable publish and the staged original's unlink
-  leaves the original behind; salvaging it would list one evaluation
-  twice. Identity is (eval_set_id, creation_timestamp), which ADK stamps
-  uniquely per save.
+  leaves the original behind; salvaging it normally would list one
+  evaluation twice, but deleting it could destroy a distinct run that
+  merely looks identical. It is moved to a non-discoverable .duplicate
+  name instead: off ADK's listing, preserved byte-for-byte.
   """
   manager = evaluation_module._ReadableNameEvalSetResultsManager(
       agents_dir=str(tmp_path)
@@ -606,7 +607,18 @@ def test_recovery_drops_original_of_an_already_published_result(
 
   manager._salvage_staging(staging_dir)
 
-  assert [p.name for p in history_dir.iterdir()] == [readable_name]
+  parked_name = f'{original_name}.duplicate'
+  assert sorted(p.name for p in history_dir.iterdir()) == sorted(
+      [readable_name, parked_name]
+  )
+  # Discovery sees exactly one run; the parked original keeps its bytes.
+  assert [p.name for p in history_dir.glob('*.evalset_result.json')] == [
+      readable_name
+  ]
+  parked = json.loads(
+      (history_dir / parked_name).read_text(encoding='utf-8')
+  )
+  assert parked['creation_timestamp'] == 111.5
   assert not staging_dir.exists()
 
 
