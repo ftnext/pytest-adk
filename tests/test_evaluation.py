@@ -349,6 +349,34 @@ def test_unrecognized_adk_output_is_preserved_not_deleted(
   )
 
 
+def test_salvage_keeps_result_when_destination_name_is_taken(tmp_path) -> None:
+  """A taken salvage destination must dedupe, never drop this save's data."""
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  existing = history_dir / 'test_app_single.test_123.5.evalset_result.json'
+  existing.parent.mkdir(parents=True)
+  existing.write_text('{"first": true}', encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = (
+      staging_dir
+      / 'test_app'
+      / '.adk'
+      / 'eval_history'
+      / 'test_app_single.test_123.5.evalset_result.json'
+  )
+  staged.parent.mkdir(parents=True)
+  staged.write_text('{"second": true}', encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert json.loads(existing.read_text(encoding='utf-8')) == {'first': True}
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  assert json.loads(duplicate.read_text(encoding='utf-8')) == {'second': True}
+  assert not staging_dir.exists()
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch

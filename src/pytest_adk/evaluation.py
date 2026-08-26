@@ -134,9 +134,58 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         continue
       destination = Path(self._results_root) / path.relative_to(staging_dir)
       destination.parent.mkdir(parents=True, exist_ok=True)
-      if not destination.exists():
-        os.replace(path, destination)
+      self._move_without_overwrite(path, destination)
     shutil.rmtree(staging_dir, ignore_errors=True)
+
+  @staticmethod
+  def _numbered(destination: Path, counter: int) -> Path:
+    """Returns the ``counter``-th candidate name for ``destination``.
+
+    Numbering goes before ``.evalset_result.json`` (or before a plain last
+    suffix) so a deduplicated result file is still discoverable.
+    """
+    if counter == 1:
+      return destination
+    name = destination.name
+    if name.endswith(_RESULT_FILE_SUFFIX):
+      base = name.removesuffix(_RESULT_FILE_SUFFIX)
+      return destination.with_name(f'{base}-{counter}{_RESULT_FILE_SUFFIX}')
+    return destination.with_name(
+        f'{destination.stem}-{counter}{destination.suffix}'
+    )
+
+  @classmethod
+  def _move_without_overwrite(cls, path: Path, destination: Path) -> None:
+    """Moves ``path`` to ``destination``, deduplicating instead of replacing.
+
+    A taken name gets a ``-2``, ``-3``, ... variant rather than being
+    overwritten or -- worse -- the move being skipped, which would let the
+    caller's cleanup delete ``path`` with this save's data still inside.
+    The name is claimed atomically (``os.link``, or exclusive-create where
+    hard links are unsupported) so a concurrent claimer of the same name
+    cannot be overwritten either.
+    """
+    counter = 1
+    while True:
+      candidate = cls._numbered(destination, counter)
+      try:
+        os.link(path, candidate)
+      except FileExistsError:
+        counter += 1
+        continue
+      except OSError:
+        # No hard-link support: exclusive-create claims the name, then the
+        # data immediately replaces the placeholder.
+        try:
+          with open(candidate, 'x', encoding='utf-8'):
+            pass
+        except FileExistsError:
+          counter += 1
+          continue
+        os.replace(path, candidate)
+        return
+      path.unlink()
+      return
 
   @staticmethod
   def _publish_readable(saved: Path, history_dir: Path) -> None:
