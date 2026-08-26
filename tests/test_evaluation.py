@@ -216,6 +216,94 @@ def test_same_second_saves_keep_every_result_file(tmp_path, monkeypatch) -> None
   assert saved_eval_ids == {'case1', 'case2'}
 
 
+def test_save_identifies_its_own_file_despite_concurrent_writers(
+    tmp_path, monkeypatch
+) -> None:
+  """A file landing concurrently in the shared dir must not derail the save.
+
+  The save stages through a private directory, so another writer completing
+  mid-save can neither be mistaken for our output nor make our file count
+  ambiguous; our result still gets the readable name and the foreign file is
+  left alone.
+  """
+
+  class _FrozenDatetime:
+    @staticmethod
+    def now() -> datetime:
+      return datetime(2026, 8, 26, 12, 34, 56)
+
+  monkeypatch.setattr(evaluation_module, 'datetime', _FrozenDatetime)
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  foreign = history_dir / 'test_app_single.test_1756180000.5.evalset_result.json'
+  original_save = evaluation_module.LocalEvalSetResultsManager.save_eval_set_result
+
+  def racing_save(self, *, app_name, eval_set_id, eval_case_results):
+    original_save(
+        self,
+        app_name=app_name,
+        eval_set_id=eval_set_id,
+        eval_case_results=eval_case_results,
+    )
+    # Simulates another process completing its own save into the shared
+    # history directory while this save is still in flight.
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text('{}', encoding='utf-8')
+
+  monkeypatch.setattr(
+      evaluation_module.LocalEvalSetResultsManager,
+      'save_eval_set_result',
+      racing_save,
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  assert sorted(p.name for p in history_dir.iterdir()) == [
+      'test_app_single.test_1756180000.5.evalset_result.json',
+      'test_app_single.test_20260826-123456.evalset_result.json',
+  ]
+
+
+def test_failed_readable_publish_falls_back_to_adk_names(
+    tmp_path, monkeypatch
+) -> None:
+  """When the readable-name path fails, the result must still be published.
+
+  The fallback uses ADK's own unix-timestamp name, whose embedded ids
+  already match, so the filename/id invariant holds on the failure path too.
+  """
+
+  def _refuse_publish(saved, history_dir):
+    raise OSError('simulated hard-link failure')
+
+  monkeypatch.setattr(
+      evaluation_module._ReadableNameEvalSetResultsManager,
+      '_publish_readable',
+      staticmethod(_refuse_publish),
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  files = list(history_dir.iterdir())
+  assert len(files) == 1
+  saved_file = files[0]
+  stem = saved_file.name.removesuffix('.evalset_result.json')
+  assert re.fullmatch(r'test_app_single\.test_\d+\.\d+', stem)
+  payload = json.loads(saved_file.read_text(encoding='utf-8'))
+  assert payload['eval_set_result_id'] == stem
+  assert payload['eval_set_result_name'] == stem
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch

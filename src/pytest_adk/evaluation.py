@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -43,17 +45,30 @@ _ADK_EVAL_HISTORY_SUBDIR = Path('.adk') / 'eval_history'
 _RESULT_FILE_SUFFIX = '.evalset_result.json'
 _UNIX_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d+\.\d+$')
 _LOCAL_DATETIME_FORMAT = '%Y%m%d-%H%M%S'
+# Hidden and suffix-less, so neither ADK's listdir-based discovery nor the
+# suffix glob below can ever see files that are still being staged.
+_STAGING_PREFIX = '.staging-'
 
 
 class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
   """LocalEvalSetResultsManager that names files by local datetime.
 
   ADK names each result file ``{app}_{eval_set}_{time.time()}`` (a bare unix
-  float). This renames the just-written file so the timestamp component reads
-  as local ``YYYYMMDD-HHMMSS``, keeping ADK's ``.evalset_result.json`` suffix
-  so ``list_eval_set_results`` / ``get_eval_set_result`` / ``adk web`` still
-  discover it. If ADK's naming ever changes shape, the rename is skipped and
-  ADK's own name stands.
+  float). This publishes the file as local ``YYYYMMDD-HHMMSS`` instead,
+  keeping ADK's ``.evalset_result.json`` suffix so ``list_eval_set_results``
+  / ``get_eval_set_result`` / ``adk web`` still discover it.
+
+  Each save lets ADK write into a private staging directory, so this
+  process's file is identified directly rather than by diffing the shared
+  history directory (concurrent savers cannot confuse each other's output).
+  The embedded ids are rewritten to the readable stem while the file is
+  still unpublished, then the document is published atomically with
+  ``os.link`` -- a concurrent same-second save gets ``FileExistsError`` and
+  takes a ``-2``, ``-3``, ... counter instead of overwriting, and no empty,
+  partial, or id-mismatched file ever appears under a discoverable name.
+  If any step of the readable-name path fails, the file ADK wrote is
+  published unchanged under ADK's own unix-timestamp name, keeping filename
+  and embedded ids consistent on every path.
   """
 
   def __init__(self, agents_dir: str) -> None:
@@ -67,7 +82,7 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
       eval_set_id: str,
       eval_case_results: list[EvalCaseResult],
   ) -> None:
-    """Saves via ADK, then renames the file to a local-datetime stem.
+    """Saves via ADK into staging, then publishes under a datetime stem.
 
     Args:
         app_name: ADK app name; also the results subdirectory.
@@ -75,59 +90,82 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         eval_case_results: Results to persist, forwarded to ADK unchanged.
     """
     history_dir = Path(self._results_root) / app_name / _ADK_EVAL_HISTORY_SUBDIR
-    pattern = '*' + _RESULT_FILE_SUFFIX
-    before = set(history_dir.glob(pattern)) if history_dir.is_dir() else set()
-    super().save_eval_set_result(
-        app_name=app_name,
-        eval_set_id=eval_set_id,
-        eval_case_results=eval_case_results,
-    )
-    created = set(history_dir.glob(pattern)) - before
-    if len(created) != 1:
-      return
-    saved = created.pop()
+    history_dir.mkdir(parents=True, exist_ok=True)
+    # Inside history_dir so the hard link below stays on one filesystem.
+    staging_dir = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=history_dir))
+    try:
+      LocalEvalSetResultsManager(
+          agents_dir=os.fspath(staging_dir)
+      ).save_eval_set_result(
+          app_name=app_name,
+          eval_set_id=eval_set_id,
+          eval_case_results=eval_case_results,
+      )
+      staged = list(
+          (staging_dir / app_name / _ADK_EVAL_HISTORY_SUBDIR).glob(
+              '*' + _RESULT_FILE_SUFFIX
+          )
+      )
+      if len(staged) == 1:
+        try:
+          self._publish_readable(staged[0], history_dir)
+          return
+        except Exception:  # noqa: BLE001 - fall through to publish as-is
+          pass
+      # Fail-soft (ADK wrote something unexpected, the filesystem lacks hard
+      # links, ...): publish whatever ADK wrote under its own unix-timestamp
+      # names, whose embedded ids already match.
+      for saved in staged:
+        if saved.exists():
+          os.replace(saved, history_dir / saved.name)
+    finally:
+      shutil.rmtree(staging_dir, ignore_errors=True)
+
+  @staticmethod
+  def _publish_readable(saved: Path, history_dir: Path) -> None:
+    """Publishes staged file ``saved`` under a local-datetime name.
+
+    Raises:
+        Exception: When any step fails; ``saved`` is left untouched so the
+            caller can publish it under ADK's original name instead.
+    """
     base, replaced = _UNIX_TIMESTAMP_SUFFIX_RE.subn(
         '', saved.name.removesuffix(_RESULT_FILE_SUFFIX)
     )
     if replaced != 1:
-      return
+      raise ValueError(f'unexpected ADK result file name: {saved.name}')
+    payload = json.loads(saved.read_text(encoding='utf-8'))
+    if not isinstance(payload, dict):
+      raise ValueError('unexpected ADK result payload shape')
+    # The rewritten document lives next to ``saved`` in staging, keeping
+    # ``saved`` pristine for the caller's fail-soft path.
+    publishable = saved.with_name('publishable' + _RESULT_FILE_SUFFIX)
     stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
     counter = 1
     while True:
       numbering = '' if counter == 1 else f'-{counter}'
       target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
+      # Keep the embedded id in step with the name about to be claimed,
+      # before anything is published. creation_timestamp is deliberately
+      # left as the raw unix float: adk web compares it to find the most
+      # recent run for an eval set.
+      new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
+      payload['eval_set_result_id'] = new_stem
+      payload['eval_set_result_name'] = new_stem
+      publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
       try:
         # link() atomically claims the name -- a concurrent save (another
         # process writing the same app/eval set in the same second) gets
         # FileExistsError and moves on to the next counter instead of
         # silently overwriting this result -- and publishes the complete
-        # ADK-written document in the same step, so no empty or partial
-        # file ever appears under a ``*.evalset_result.json`` name, even if
-        # this process dies mid-save.
-        os.link(saved, target)
+        # rewritten document in the same step, so no empty or partial file
+        # ever appears under a ``*.evalset_result.json`` name, even if this
+        # process dies mid-save.
+        os.link(publishable, target)
       except FileExistsError:
         counter += 1
         continue
-      except OSError:
-        # Filesystem without hard-link support: keep ADK's unix-timestamp
-        # name rather than fall back to a rename that could race a
-        # concurrent save.
-        return
-      break
-    saved.unlink()
-    # Keep the embedded id in step with the filename. creation_timestamp is
-    # deliberately left as the raw unix float: adk web compares it to find
-    # the most recent run for an eval set. The rewrite goes through a
-    # non-discoverable ``.tmp`` name and an atomic replace, so readers only
-    # ever see a complete document under the published name.
-    payload = json.loads(target.read_text(encoding='utf-8'))
-    if isinstance(payload, dict):
-      new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
-      payload['eval_set_result_id'] = new_stem
-      payload['eval_set_result_name'] = new_stem
-      rewritten = target.with_name(target.name + '.tmp')
-      rewritten.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-      os.replace(rewritten, target)
+      return
 
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:
