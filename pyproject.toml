@@ -1,6 +1,6 @@
 [project]
 name = "pytest-adk"
-version = "0.0.8"
+version = "0.0.9"
 description = "Helpers for testing agents with Google's adk-python"
 readme = "README.md"
 authors = [
