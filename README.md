@@ -172,10 +172,19 @@ Details:
 - `FILENAME` is resolved **relative to the evalset file's directory**.
 - The marker must be the **whole** `text` value (leading/trailing whitespace is
   ignored); markers embedded inside other text are not expanded.
-- `KEY=VALUE` pairs are **space-separated**, so values cannot contain spaces.
+- `KEY=VALUE` pairs are **space-separated**. A value (or `FILENAME`) that
+  contains spaces must be **quoted**, shell-style:
+
+  ```toml
+  parts = [ { text = "<prompt:prompt.txt CONTEXT='hello world'>" } ]
+  ```
+
+  Both `'...'` and `"..."` work; the marker body is tokenized with
+  [`shlex.split`](https://docs.python.org/3/library/shlex.html#shlex.split), so
+  a backslash escapes the next character — write paths with `/`.
 - It is an **error** if the prompt file is missing, a `KEY=VALUE` pair is
-  malformed, or the prompt references a variable that the marker does not
-  provide.
+  malformed, a quote is left unclosed, or the prompt references a variable that
+  the marker does not provide.
 
 ### Jinja prompt templates
 

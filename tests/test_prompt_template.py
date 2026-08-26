@@ -181,3 +181,85 @@ def test_string_engine_leaves_double_braces_untouched(tmp_path) -> None:
 
   text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
   assert text == 'Keep {{ VAR1 }} but expand foo'
+
+
+def test_single_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${CONTEXT}.', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT='hello world'>")
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say hello world.'
+
+
+def test_double_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Turn on ${ROOM}. Say ${CONTEXT}.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text(
+      '<prompt:prompt.txt ROOM=living CONTEXT="hello world">'
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Turn on living. Say hello world.'
+
+
+def test_quoted_value_may_contain_multibyte_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${CONTEXT}.', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT='こんにちは 世界'>")
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say こんにちは 世界.'
+
+
+def test_quoted_empty_value_is_kept(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('[${CONTEXT}]', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT=''>")
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == '[]'
+
+
+def test_quoted_file_name_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'my prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:'my prompt.txt' VAR1=world>")
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Hello world'
+
+
+def test_quoted_value_may_contain_the_marker_terminator(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${CONTEXT}.', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT='a > b'>")
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say a > b.'
+
+
+def test_jinja_engine_accepts_quoted_value_with_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say {{ CONTEXT }}.', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT='hello world'>")
+
+  _expand_prompt_templates(eval_set, tmp_path, 'jinja')
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say hello world.'
+
+
+def test_unbalanced_quote_raises(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${CONTEXT}.', encoding='utf-8')
+  eval_set = _eval_set_with_text("<prompt:prompt.txt CONTEXT='hello world>")
+
+  with pytest.raises(ValueError, match='quot'):
+    _expand_prompt_templates(eval_set, tmp_path)

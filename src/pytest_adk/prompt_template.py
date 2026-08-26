@@ -11,6 +11,11 @@ the referenced file is read and its placeholders are substituted with the values
 from the marker. This lets several eval cases share one common prompt file while
 only varying a few variables.
 
+The marker body is tokenized with :func:`shlex.split`, so a file name or a value
+that contains spaces can be quoted::
+
+    <prompt:prompt.txt CONTEXT='hello world'>
+
 Two rendering engines are supported. The default ``'string'`` engine uses
 Python's :class:`string.Template` (``${VAR}`` syntax). The optional ``'jinja'``
 engine uses Jinja2 (``{{ VAR }}`` syntax) and requires the ``jinja`` extra
@@ -24,6 +29,7 @@ evaluator, so the agent always sees the fully rendered prompt.
 from __future__ import annotations
 
 import re
+import shlex
 import string
 from pathlib import Path
 
@@ -119,7 +125,14 @@ def _expand_text(
   if match is None:
     return text
 
-  tokens = match.group('body').split()
+  # ``shlex.split`` (rather than ``str.split``) so that a quoted file name or
+  # value may contain spaces: ``<prompt:prompt.txt CONTEXT='hello world'>``.
+  try:
+    tokens = shlex.split(match.group('body'))
+  except ValueError as error:
+    raise ValueError(
+        f'Failed to parse prompt template marker {text.strip()!r}: {error}.'
+    ) from error
   if not tokens:
     raise ValueError(
         'Prompt template marker is missing a file name: '
