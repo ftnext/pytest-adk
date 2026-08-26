@@ -170,6 +170,9 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     counter = 1
     while True:
       candidate = cls._numbered(destination, counter)
+      # Still in staging here, so the rewrite is invisible until the
+      # atomic claim below publishes the finished document.
+      cls._align_embedded_ids(path, candidate)
       try:
         os.link(path, candidate)
       except FileExistsError:
@@ -204,6 +207,35 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         return
       path.unlink()
       return
+
+  @staticmethod
+  def _align_embedded_ids(path: Path, candidate: Path) -> None:
+    """Aligns a recognized result document's embedded ids with ``candidate``.
+
+    Deduplicating to a ``-2`` name without touching the content would leave
+    the file identifying itself as the preexisting one, so a lookup by the
+    listed stem could return the wrong result. Only documents that are
+    recognizably eval set results (result suffix, JSON object carrying
+    ``eval_set_result_id``) are rewritten; anything else is moved untouched
+    -- preserving the data takes priority over aligning it.
+    """
+    if not candidate.name.endswith(_RESULT_FILE_SUFFIX):
+      return
+    try:
+      payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+      return
+    if not isinstance(payload, dict) or 'eval_set_result_id' not in payload:
+      return
+    stem = candidate.name.removesuffix(_RESULT_FILE_SUFFIX)
+    if (
+        payload.get('eval_set_result_id') == stem
+        and payload.get('eval_set_result_name') == stem
+    ):
+      return
+    payload['eval_set_result_id'] = stem
+    payload['eval_set_result_name'] = stem
+    path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
 
   @staticmethod
   def _publish_readable(saved: Path, history_dir: Path) -> None:

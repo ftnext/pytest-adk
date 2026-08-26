@@ -429,6 +429,61 @@ def test_salvage_without_hard_links_leaves_no_empty_results(
   assert discovered == sorted([existing.name, duplicate.name])
 
 
+def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
+  """A deduplicated result document must identify itself by its new stem.
+
+  Without the rewrite, the ``-2`` file would still carry the preexisting
+  file's ids, so an ADK lookup by the listed stem could return the wrong
+  result. The rewrite happens in staging, before the atomic publish.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  stem = name.removesuffix('.evalset_result.json')
+  existing = history_dir / name
+  existing.parent.mkdir(parents=True)
+  existing.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': stem,
+              'eval_set_result_name': stem,
+              'creation_timestamp': 123.5,
+              'marker': 'first',
+          }
+      ),
+      encoding='utf-8',
+  )
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': stem,
+              'eval_set_result_name': stem,
+              'creation_timestamp': 123.5,
+              'marker': 'second',
+          }
+      ),
+      encoding='utf-8',
+  )
+
+  manager._salvage_staging(staging_dir)
+
+  first = json.loads(existing.read_text(encoding='utf-8'))
+  assert first['marker'] == 'first'
+  assert first['eval_set_result_id'] == stem
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  second = json.loads(duplicate.read_text(encoding='utf-8'))
+  duplicate_stem = duplicate.name.removesuffix('.evalset_result.json')
+  assert second['marker'] == 'second'
+  assert second['eval_set_result_id'] == duplicate_stem
+  assert second['eval_set_result_name'] == duplicate_stem
+  assert second['creation_timestamp'] == 123.5
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch
