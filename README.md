@@ -173,9 +173,11 @@ Details:
 - The marker must be the **whole** `text` value (leading/trailing whitespace is
   ignored); markers embedded inside other text are not expanded.
 - `KEY=VALUE` pairs are **space-separated** (the marker is split with
-  [`shlex.split`][shlex-split]). **Quote** a value that contains spaces:
+  [`shlex`][shlex], in POSIX mode). **Quote** a value that contains spaces:
   `ROOM="living room"`. A file name with spaces can be quoted too:
   `<prompt:"my prompt.txt" ROOM=living>`.
+- Quoting is the **only** escape: backslashes are literal (so `PATTERN=\d+`
+  keeps its backslash) and `#` starts no comment.
 - In TOML, use a *literal* string (single quotes) for the `text` value so the
   quotes inside the marker need no escaping:
 
@@ -187,7 +189,7 @@ Details:
   malformed, a quote is left unclosed, or the prompt references a variable that
   the marker does not provide.
 
-[shlex-split]: https://docs.python.org/3/library/shlex.html#shlex.split
+[shlex]: https://docs.python.org/3/library/shlex.html
 
 ### Jinja prompt templates
 

@@ -108,6 +108,26 @@ def _render_prompt(
   )
 
 
+def _split_marker_body(body: str) -> list[str]:
+  r"""Split a marker body into a file name and ``KEY=VALUE`` tokens.
+
+  Uses :mod:`shlex` (rather than :meth:`str.split`) so that a quoted file name
+  or variable value may contain whitespace: ``ROOM="living room"``. POSIX
+  backslash escaping is turned off (``escape = ''``) so that a backslash stays
+  literal, as it was when the body was split on whitespace: markers such as
+  ``PATTERN=\d+`` keep their backslash instead of losing it. Quoting is
+  therefore the only way to include whitespace, and ``#`` starts no comment.
+
+  Raises:
+      ValueError: If a quote is left unclosed.
+  """
+  lexer = shlex.shlex(body, posix=True)
+  lexer.whitespace_split = True
+  lexer.commenters = ''
+  lexer.escape = ''
+  return list(lexer)
+
+
 def _expand_text(
     text: str | None, base_dir: Path, engine: str = _DEFAULT_ENGINE
 ) -> str | None:
@@ -124,10 +144,8 @@ def _expand_text(
   if match is None:
     return text
 
-  # ``shlex.split`` (rather than ``str.split``) so that a quoted file name or
-  # variable value may contain whitespace: ``ROOM="living room"``.
   try:
-    tokens = shlex.split(match.group('body'))
+    tokens = _split_marker_body(match.group('body'))
   except ValueError as error:
     raise ValueError(
         f'Failed to parse prompt template marker {marker!r}: {error}.'

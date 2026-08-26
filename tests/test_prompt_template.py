@@ -135,6 +135,45 @@ def test_quoted_value_may_be_empty(tmp_path) -> None:
   assert text == '[]'
 
 
+def test_backslashes_in_values_are_literal(tmp_path) -> None:
+  # Splitting must not apply POSIX escaping: a backslash that used to survive
+  # str.split() (a regex, a Windows-style path) still reaches the template.
+  (tmp_path / 'prompt.txt').write_text(
+      'Match ${PATTERN} in ${WIN_PATH}.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text(
+      r'<prompt:prompt.txt PATTERN=\d+ WIN_PATH=C:\dir\file.txt>'
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == r'Match \d+ in C:\dir\file.txt.'
+
+
+def test_backslashes_in_file_name_are_literal(tmp_path) -> None:
+  # A backslash-separated relative path keeps its separator; on POSIX that is
+  # a (weird but valid) file name, which is exactly what str.split() used to
+  # look up.
+  subdir = tmp_path / 'subdir'
+  subdir.mkdir()
+  (subdir / 'prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text(r'<prompt:subdir\prompt.txt VAR1=world>')
+
+  with pytest.raises(FileNotFoundError, match=r'subdir\\prompt.txt'):
+    _expand_prompt_templates(eval_set, tmp_path)
+
+
+def test_hash_in_value_is_not_a_comment(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Tag ${TAG} and ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt TAG=#hash VAR1=foo>')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Tag #hash and foo'
+
+
 def test_unbalanced_quote_raises(tmp_path) -> None:
   (tmp_path / 'prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
   eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1="unclosed>')
