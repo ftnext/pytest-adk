@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -48,6 +49,9 @@ _LOCAL_DATETIME_FORMAT = '%Y%m%d-%H%M%S'
 # Hidden and suffix-less, so neither ADK's listdir-based discovery nor the
 # suffix glob below can ever see files that are still being staged.
 _STAGING_PREFIX = '.staging-'
+# A staging directory quiet for this long is considered abandoned by a killed
+# process and gets recovered; younger ones may belong to a save in flight.
+_STAGING_RECOVERY_AGE_SECONDS = 3600
 
 
 class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
@@ -91,6 +95,9 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     """
     history_dir = Path(self._results_root) / app_name / _ADK_EVAL_HISTORY_SUBDIR
     history_dir.mkdir(parents=True, exist_ok=True)
+    # Give results stranded by an earlier killed process a way back into
+    # history before this save creates its own staging directory.
+    self._recover_abandoned_staging(history_dir)
     # Inside history_dir so the hard link below stays on one filesystem.
     staging_dir = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=history_dir))
     try:
@@ -116,6 +123,36 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
           pass
     finally:
       self._salvage_staging(staging_dir)
+
+  def _recover_abandoned_staging(self, history_dir: Path) -> None:
+    """Publishes results orphaned in staging by a killed process.
+
+    A save interrupted after ADK wrote the result but before publication
+    leaves the completed document hidden in its private ``.staging-*``
+    directory, where no later run would otherwise look. Directories whose
+    entire tree has been quiet for ``_STAGING_RECOVERY_AGE_SECONDS`` are
+    atomically renamed -- claiming them, so concurrent recoverers cannot
+    process the same one -- and salvaged like this save's own staging.
+    Younger directories are left alone: they may belong to a save still in
+    flight, and salvaging mid-write could publish a partial document. (The
+    claimed name keeps the staging prefix, so a recovery that itself dies
+    is picked up again by a later save.)
+    """
+    now = time.time()
+    for entry in list(history_dir.glob(_STAGING_PREFIX + '*')):
+      try:
+        if not entry.is_dir():
+          continue
+        newest = max(p.stat().st_mtime for p in (entry, *entry.rglob('*')))
+        if now - newest < _STAGING_RECOVERY_AGE_SECONDS:
+          continue
+        claimed = entry.with_name(entry.name + '.recovering')
+        entry.rename(claimed)
+      except OSError:
+        # Recovered, removed, or still being written by someone else.
+        continue
+      with contextlib.suppress(OSError):
+        self._salvage_staging(claimed)
 
   def _salvage_staging(self, staging_dir: Path) -> None:
     """Moves everything left in ``staging_dir`` into the real tree.

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -526,6 +528,44 @@ def test_failed_id_alignment_still_salvages_the_original(
   # The original document survives byte-for-byte, stale ids and all.
   assert json.loads(duplicate.read_text(encoding='utf-8')) == staged_document
   assert not staging_dir.exists()
+
+
+def test_abandoned_staging_is_recovered_but_live_staging_is_not(
+    tmp_path,
+) -> None:
+  """Results stranded by a killed process must find their way back.
+
+  A staging directory quiet for longer than the recovery age is salvaged
+  into history; a fresh one -- possibly a save still in flight -- is left
+  untouched so a partial document is never published.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  abandoned = history_dir / '.staging-abandoned'
+  abandoned_file = abandoned / 'test_app' / '.adk' / 'eval_history' / name
+  abandoned_file.parent.mkdir(parents=True)
+  abandoned_file.write_text('{"marker": "abandoned"}', encoding='utf-8')
+  stale = time.time() - 2 * evaluation_module._STAGING_RECOVERY_AGE_SECONDS
+  for path in (abandoned, *abandoned.rglob('*')):
+    os.utime(path, (stale, stale))
+  live = history_dir / '.staging-live'
+  live_file = live / 'test_app' / '.adk' / 'eval_history' / name
+  live_file.parent.mkdir(parents=True)
+  live_file.write_text('{"marker": "live"}', encoding='utf-8')
+
+  manager._recover_abandoned_staging(history_dir)
+
+  recovered = history_dir / name
+  assert json.loads(recovered.read_text(encoding='utf-8')) == {
+      'marker': 'abandoned'
+  }
+  assert not abandoned.exists()
+  assert not (history_dir / '.staging-abandoned.recovering').exists()
+  # The fresh directory might belong to a save in flight: untouched.
+  assert json.loads(live_file.read_text(encoding='utf-8')) == {'marker': 'live'}
 
 
 @pytest.mark.asyncio
