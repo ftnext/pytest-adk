@@ -150,6 +150,43 @@ def test_colorize_respects_dumb_term_even_on_a_tty(monkeypatch) -> None:
   assert cli_module._colorize('FAILED', cli_module._ANSI_RED, stream=stream) == 'FAILED'
 
 
+def test_colorize_suppressed_on_windows_when_vt_cannot_be_enabled(
+    monkeypatch,
+) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  monkeypatch.setattr(cli_module.os, 'name', 'nt')
+  monkeypatch.setattr(
+      cli_module, '_enable_windows_vt_processing', lambda stream: False
+  )
+  stream = _FakeStream(is_tty=True)
+
+  assert cli_module._colorize('FAILED', cli_module._ANSI_RED, stream=stream) == 'FAILED'
+
+
+def test_colorize_colors_on_windows_once_vt_is_enabled(monkeypatch) -> None:
+  monkeypatch.delenv('NO_COLOR', raising=False)
+  monkeypatch.setenv('TERM', 'xterm-256color')
+  monkeypatch.setattr(cli_module.os, 'name', 'nt')
+  monkeypatch.setattr(
+      cli_module, '_enable_windows_vt_processing', lambda stream: True
+  )
+  stream = _FakeStream(is_tty=True)
+
+  result = cli_module._colorize('PASSED', cli_module._ANSI_GREEN, stream=stream)
+
+  assert result == f'{cli_module._ANSI_GREEN}PASSED{cli_module._ANSI_RESET}'
+
+
+def test_enable_windows_vt_processing_fails_soft_off_windows() -> None:
+  # On POSIX there is no msvcrt (and _FakeStream has no fileno); the helper
+  # must swallow that and report "no ANSI support" instead of raising.
+  assert (
+      cli_module._enable_windows_vt_processing(_FakeStream(is_tty=True))
+      is False
+  )
+
+
 def test_colorize_tolerates_a_stream_with_no_isatty_method(monkeypatch) -> None:
   monkeypatch.delenv('NO_COLOR', raising=False)
   monkeypatch.setenv('TERM', 'xterm-256color')

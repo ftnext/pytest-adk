@@ -1155,13 +1155,50 @@ _ANSI_RED = '\x1b[31m'
 _ANSI_RESET = '\x1b[0m'
 
 
+def _enable_windows_vt_processing(stream) -> bool:
+  """Turns on ANSI interpretation for ``stream``'s Windows console, if it can.
+
+  A legacy Windows console reports ``isatty() == True`` yet renders raw ANSI
+  escapes as mojibake unless ENABLE_VIRTUAL_TERMINAL_PROCESSING has been set
+  on its handle, so colorizing is only safe once this succeeds. Modern
+  terminals (Windows Terminal, ConEmu, ...) either preset the flag or accept
+  it being set here.
+
+  Returns:
+      ``True`` if the console interprets ANSI sequences (the flag was already
+      set or was set successfully), ``False`` otherwise -- including on
+      non-Windows platforms, where the required modules do not exist.
+  """
+  try:
+    import ctypes
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    kernel32 = ctypes.windll.kernel32
+    mode = ctypes.c_uint32()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+      return False
+    enable_virtual_terminal_processing = 0x0004
+    if mode.value & enable_virtual_terminal_processing:
+      return True
+    return bool(
+        kernel32.SetConsoleMode(
+            handle, mode.value | enable_virtual_terminal_processing
+        )
+    )
+  except Exception:  # noqa: BLE001 - any failure means "don't emit ANSI"
+    return False
+
+
 def _colorize(text: str, color: str, *, stream) -> str:
   """Wraps ``text`` in an ANSI color code if ``stream`` looks like a color-capable tty.
 
   Colorizing is skipped (returning ``text`` unchanged) when ``stream`` is not a
   tty (e.g. piped output, or pytest's ``capsys``), when ``NO_COLOR`` is set
-  (see https://no-color.org), or when ``TERM=dumb``. No new dependency is
-  introduced for this -- raw ANSI escape codes are used directly.
+  (see https://no-color.org), when ``TERM=dumb``, or on a Windows console
+  whose virtual-terminal processing cannot be enabled (a legacy console shows
+  literal escape characters otherwise). No new dependency is introduced for
+  this -- raw ANSI escape codes are used directly.
 
   Args:
       text: The text to colorize.
@@ -1175,6 +1212,8 @@ def _colorize(text: str, color: str, *, stream) -> str:
   if os.environ.get('NO_COLOR'):
     return text
   if os.environ.get('TERM') == 'dumb':
+    return text
+  if os.name == 'nt' and not _enable_windows_vt_processing(stream):
     return text
   return f'{color}{text}{_ANSI_RESET}'
 
