@@ -109,17 +109,34 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
       if len(staged) == 1:
         try:
           self._publish_readable(staged[0], history_dir)
-          return
-        except Exception:  # noqa: BLE001 - fall through to publish as-is
+          # Published under the readable name; drop the staged original so
+          # the salvage below does not publish it a second time.
+          staged[0].unlink()
+        except Exception:  # noqa: BLE001 - salvage publishes it as-is
           pass
-      # Fail-soft (ADK wrote something unexpected, the filesystem lacks hard
-      # links, ...): publish whatever ADK wrote under its own unix-timestamp
-      # names, whose embedded ids already match.
-      for saved in staged:
-        if saved.exists():
-          os.replace(saved, history_dir / saved.name)
     finally:
-      shutil.rmtree(staging_dir, ignore_errors=True)
+      self._salvage_staging(staging_dir)
+
+  def _salvage_staging(self, staging_dir: Path) -> None:
+    """Moves everything left in ``staging_dir`` into the real tree.
+
+    The staging directory mirrors the ``agents_dir`` layout, so each
+    remaining file is relocated to the same relative path under the real
+    results root -- whatever ADK named it. Deleting unrecognized content
+    instead would silently drop results the moment ADK changes its output
+    layout; this way a save always lands on disk, at worst under ADK's own
+    names (whose embedded ids already match). The (by then empty) staging
+    tree is removed only after every file has been moved out, so nothing is
+    ever deleted with data still inside.
+    """
+    for path in sorted(staging_dir.rglob('*')):
+      if not path.is_file():
+        continue
+      destination = Path(self._results_root) / path.relative_to(staging_dir)
+      destination.parent.mkdir(parents=True, exist_ok=True)
+      if not destination.exists():
+        os.replace(path, destination)
+    shutil.rmtree(staging_dir, ignore_errors=True)
 
   @staticmethod
   def _publish_readable(saved: Path, history_dir: Path) -> None:
@@ -138,34 +155,39 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     if not isinstance(payload, dict):
       raise ValueError('unexpected ADK result payload shape')
     # The rewritten document lives next to ``saved`` in staging, keeping
-    # ``saved`` pristine for the caller's fail-soft path.
-    publishable = saved.with_name('publishable' + _RESULT_FILE_SUFFIX)
-    stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
-    counter = 1
-    while True:
-      numbering = '' if counter == 1 else f'-{counter}'
-      target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
-      # Keep the embedded id in step with the name about to be claimed,
-      # before anything is published. creation_timestamp is deliberately
-      # left as the raw unix float: adk web compares it to find the most
-      # recent run for an eval set.
-      new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
-      payload['eval_set_result_id'] = new_stem
-      payload['eval_set_result_name'] = new_stem
-      publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-      try:
-        # link() atomically claims the name -- a concurrent save (another
-        # process writing the same app/eval set in the same second) gets
-        # FileExistsError and moves on to the next counter instead of
-        # silently overwriting this result -- and publishes the complete
-        # rewritten document in the same step, so no empty or partial file
-        # ever appears under a ``*.evalset_result.json`` name, even if this
-        # process dies mid-save.
-        os.link(publishable, target)
-      except FileExistsError:
-        counter += 1
-        continue
-      return
+    # ``saved`` pristine for the caller's fail-soft path. Its name avoids the
+    # result-file suffix so the salvage pass can never mistake this working
+    # copy for a result, and it is removed here in every outcome.
+    publishable = saved.with_name('.publishable.tmp')
+    try:
+      stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
+      counter = 1
+      while True:
+        numbering = '' if counter == 1 else f'-{counter}'
+        target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
+        # Keep the embedded id in step with the name about to be claimed,
+        # before anything is published. creation_timestamp is deliberately
+        # left as the raw unix float: adk web compares it to find the most
+        # recent run for an eval set.
+        new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
+        payload['eval_set_result_id'] = new_stem
+        payload['eval_set_result_name'] = new_stem
+        publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        try:
+          # link() atomically claims the name -- a concurrent save (another
+          # process writing the same app/eval set in the same second) gets
+          # FileExistsError and moves on to the next counter instead of
+          # silently overwriting this result -- and publishes the complete
+          # rewritten document in the same step, so no empty or partial file
+          # ever appears under a ``*.evalset_result.json`` name, even if
+          # this process dies mid-save.
+          os.link(publishable, target)
+        except FileExistsError:
+          counter += 1
+          continue
+        return
+    finally:
+      publishable.unlink(missing_ok=True)
 
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:

@@ -304,6 +304,51 @@ def test_failed_readable_publish_falls_back_to_adk_names(
   assert payload['eval_set_result_name'] == stem
 
 
+def test_unrecognized_adk_output_is_preserved_not_deleted(
+    tmp_path, monkeypatch
+) -> None:
+  """A future ADK output format must be salvaged into the real tree, not lost.
+
+  If ADK ever changes its result filename or layout, the staging cleanup
+  must relocate whatever was written to the same relative path under the
+  real results root instead of deleting it with the staging directory.
+  """
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  original_save = evaluation_module.LocalEvalSetResultsManager.save_eval_set_result
+
+  def format_changed_save(self, *, app_name, eval_set_id, eval_case_results):
+    original_save(
+        self,
+        app_name=app_name,
+        eval_set_id=eval_set_id,
+        eval_case_results=eval_case_results,
+    )
+    # Simulates ADK adopting a different result-file extension: the staged
+    # file no longer matches what the readable-name path recognizes.
+    staged = list(history_dir.glob('.staging-*/**/*.evalset_result.json'))
+    assert len(staged) == 1
+    staged[0].rename(staged[0].with_suffix('.changed'))
+
+  monkeypatch.setattr(
+      evaluation_module.LocalEvalSetResultsManager,
+      'save_eval_set_result',
+      format_changed_save,
+  )
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app', 'single.test', [_eval_case_result('case1')]
+  )
+
+  names = [p.name for p in history_dir.iterdir()]
+  assert len(names) == 1
+  assert re.fullmatch(
+      r'test_app_single\.test_\d+\.\d+\.evalset_result\.changed', names[0]
+  )
+
+
 @pytest.mark.asyncio
 async def test_agent_evaluator_directory_finds_recursive_test_files(
     AgentEvaluator, tmp_path, monkeypatch
