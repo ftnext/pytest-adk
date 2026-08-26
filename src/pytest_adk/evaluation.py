@@ -180,9 +180,57 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
       if not path.is_file():
         continue
       destination = Path(self._results_root) / path.relative_to(staging_dir)
+      if destination.name.endswith(_RESULT_FILE_SUFFIX):
+        payload = self._load_result_document(path)
+        if payload is None:
+          # A killed ADK write can leave a truncated document, and age
+          # alone is no proof of completeness. Publish it quarantined:
+          # preserved for inspection, but invisible to suffix-based
+          # discovery, so ADK never serves a corrupt result.
+          destination = destination.with_name(destination.name + '.invalid')
+        elif self._already_published(destination.parent, payload):
+          # The readable copy reached history but the process died before
+          # the staged original was unlinked. Dropping the original is
+          # deduplication, not data loss: this exact result (same
+          # eval_set_id and creation_timestamp) is already discoverable.
+          continue
       destination.parent.mkdir(parents=True, exist_ok=True)
       self._move_without_overwrite(path, destination)
     shutil.rmtree(staging_dir, ignore_errors=True)
+
+  @staticmethod
+  def _load_result_document(path: Path) -> dict | None:
+    """Returns the parsed result document, or None when it is not one."""
+    try:
+      payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+      return None
+    return payload if isinstance(payload, dict) else None
+
+  @classmethod
+  def _already_published(cls, history_dir: Path, payload: dict) -> bool:
+    """Whether a result with ``payload``'s identity is already discoverable.
+
+    Identity is ``(eval_set_id, creation_timestamp)``: ADK stamps each
+    result with ``time.time()`` at creation, so two distinct evaluations
+    never share both. The embedded result ids cannot serve as identity --
+    publication rewrites them to the readable stem.
+    """
+    eval_set_id = payload.get('eval_set_id')
+    creation_timestamp = payload.get('creation_timestamp')
+    if eval_set_id is None or creation_timestamp is None:
+      return False
+    if not history_dir.is_dir():
+      return False
+    for existing in history_dir.glob('*' + _RESULT_FILE_SUFFIX):
+      published = cls._load_result_document(existing)
+      if (
+          published is not None
+          and published.get('eval_set_id') == eval_set_id
+          and published.get('creation_timestamp') == creation_timestamp
+      ):
+        return True
+    return False
 
   @staticmethod
   def _numbered(destination: Path, counter: int) -> Path:

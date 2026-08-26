@@ -530,6 +530,86 @@ def test_failed_id_alignment_still_salvages_the_original(
   assert not staging_dir.exists()
 
 
+def test_recovery_quarantines_truncated_results(tmp_path) -> None:
+  """A partial document must never become discoverable, only preserved.
+
+  Elapsed time is no proof of completeness: a process killed mid-write
+  leaves truncated JSON that would otherwise pass the age check and be
+  served by ADK as a corrupt result. It is published under a quarantined
+  ``.invalid`` name instead -- kept for inspection, invisible to
+  suffix-based discovery.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  truncated = '{"eval_set_id": "single.test", "creation_'
+  staged.write_text(truncated, encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  assert list(history_dir.glob('*.evalset_result.json')) == []
+  quarantined = history_dir / f'{name}.invalid'
+  assert quarantined.read_text(encoding='utf-8') == truncated
+  assert not staging_dir.exists()
+
+
+def test_recovery_drops_original_of_an_already_published_result(
+    tmp_path,
+) -> None:
+  """A staged original whose result already reached history is deduped.
+
+  Dying between the readable publish and the staged original's unlink
+  leaves the original behind; salvaging it would list one evaluation
+  twice. Identity is (eval_set_id, creation_timestamp), which ADK stamps
+  uniquely per save.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
+  readable_stem = readable_name.removesuffix('.evalset_result.json')
+  published = history_dir / readable_name
+  published.parent.mkdir(parents=True)
+  published.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': readable_stem,
+              'eval_set_result_name': readable_stem,
+              'eval_set_id': 'single.test',
+              'creation_timestamp': 111.5,
+          }
+      ),
+      encoding='utf-8',
+  )
+  staging_dir = history_dir / '.staging-test'
+  original_name = 'test_app_single.test_111.5.evalset_result.json'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(
+      json.dumps(
+          {
+              'eval_set_result_id': original_name.removesuffix(
+                  '.evalset_result.json'
+              ),
+              'eval_set_id': 'single.test',
+              'creation_timestamp': 111.5,
+          }
+      ),
+      encoding='utf-8',
+  )
+
+  manager._salvage_staging(staging_dir)
+
+  assert [p.name for p in history_dir.iterdir()] == [readable_name]
+  assert not staging_dir.exists()
+
+
 def test_abandoned_staging_is_recovered_but_live_staging_is_not(
     tmp_path,
 ) -> None:
