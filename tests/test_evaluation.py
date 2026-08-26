@@ -610,6 +610,59 @@ def test_recovery_drops_original_of_an_already_published_result(
   assert not staging_dir.exists()
 
 
+def test_recovery_keeps_distinct_result_despite_timestamp_collision(
+    tmp_path,
+) -> None:
+  """Matching timestamps alone must never classify a result as duplicate.
+
+  time.time() can tick coarsely (~15ms on older Windows Pythons), so two
+  distinct runs may share (eval_set_id, creation_timestamp). Only full
+  content equality (minus the rewritten id fields) may drop a staged
+  original; differing content must be salvaged.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
+  published = history_dir / readable_name
+  published.parent.mkdir(parents=True)
+  published.write_text(
+      json.dumps(
+          {
+              'eval_set_id': 'single.test',
+              'creation_timestamp': 111.5,
+              'eval_case_results': ['run-one'],
+          }
+      ),
+      encoding='utf-8',
+  )
+  staging_dir = history_dir / '.staging-test'
+  original_name = 'test_app_single.test_111.5.evalset_result.json'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(
+      json.dumps(
+          {
+              'eval_set_id': 'single.test',
+              'creation_timestamp': 111.5,
+              'eval_case_results': ['run-two'],
+          }
+      ),
+      encoding='utf-8',
+  )
+
+  manager._salvage_staging(staging_dir)
+
+  salvaged = history_dir / original_name
+  assert (
+      json.loads(salvaged.read_text(encoding='utf-8'))['eval_case_results']
+      == ['run-two']
+  )
+  assert published.exists()
+  assert not staging_dir.exists()
+
+
 def test_abandoned_staging_is_recovered_but_live_staging_is_not(
     tmp_path,
 ) -> None:

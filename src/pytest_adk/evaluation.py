@@ -209,28 +209,35 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
 
   @classmethod
   def _already_published(cls, history_dir: Path, payload: dict) -> bool:
-    """Whether a result with ``payload``'s identity is already discoverable.
+    """Whether this exact document is already discoverable in history.
 
-    Identity is ``(eval_set_id, creation_timestamp)``: ADK stamps each
-    result with ``time.time()`` at creation, so two distinct evaluations
-    never share both. The embedded result ids cannot serve as identity --
-    publication rewrites them to the readable stem.
+    Duplicate means field-for-field equality after dropping the two id
+    fields that publication (and salvage alignment) rewrite. A timestamp
+    key alone would not do: ``time.time()`` can tick coarsely (~15ms on
+    older Windows Pythons), so two distinct same-second runs of one eval
+    set may share ``(eval_set_id, creation_timestamp)`` -- and a distinct
+    result must be salvaged, never dropped as a duplicate.
     """
-    eval_set_id = payload.get('eval_set_id')
-    creation_timestamp = payload.get('creation_timestamp')
-    if eval_set_id is None or creation_timestamp is None:
-      return False
     if not history_dir.is_dir():
       return False
+    staged_content = cls._without_rewritten_ids(payload)
     for existing in history_dir.glob('*' + _RESULT_FILE_SUFFIX):
       published = cls._load_result_document(existing)
       if (
           published is not None
-          and published.get('eval_set_id') == eval_set_id
-          and published.get('creation_timestamp') == creation_timestamp
+          and cls._without_rewritten_ids(published) == staged_content
       ):
         return True
     return False
+
+  @staticmethod
+  def _without_rewritten_ids(payload: dict) -> dict:
+    """Drops the fields that publication rewrites, for content comparison."""
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in ('eval_set_result_id', 'eval_set_result_name')
+    }
 
   @staticmethod
   def _numbered(destination: Path, counter: int) -> Path:
