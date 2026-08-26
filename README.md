@@ -172,10 +172,24 @@ Details:
 - `FILENAME` is resolved **relative to the evalset file's directory**.
 - The marker must be the **whole** `text` value (leading/trailing whitespace is
   ignored); markers embedded inside other text are not expanded.
-- `KEY=VALUE` pairs are **space-separated**, so values cannot contain spaces.
+- `KEY=VALUE` pairs are **space-separated**. **Quote** (with `"` or `'`) a
+  value that contains spaces: `ROOM="living room"`. A file name with spaces can
+  be quoted too: `<prompt:"my prompt.txt" ROOM=living>`.
+- Quotes are only delimiters where those two forms put them — at the start of
+  the file name, and right after the `=` of a pair. Anywhere else a quote is
+  just a character (`AUTHOR=O'Reilly` needs no escaping), backslashes are
+  literal (`PATTERN=\d+` keeps its backslash), and `#` starts no comment.
+- In TOML, use a *literal* string (single quotes) for the `text` value so the
+  quotes inside the marker need no escaping:
+
+  ```toml
+  parts = [ { text = '<prompt:prompt.txt ROOM="living room">' } ]
+  ```
+
 - It is an **error** if the prompt file is missing, a `KEY=VALUE` pair is
-  malformed, or the prompt references a variable that the marker does not
-  provide.
+  malformed, a quote is left unclosed, or the prompt references a variable that
+  the marker does not provide.
+
 
 ### Jinja prompt templates
 
@@ -446,3 +460,28 @@ way, nothing extra needs installing to run `pytest-adk eval`.
   configs disagree about a metric name — can still see each other's
   registrations, and are not supported. (Running tests in parallel with
   pytest-xdist is fine: those are separate processes.)
+- google-adk's own deprecation and `[EXPERIMENTAL]` `UserWarning`s are
+  suppressed by default in `pytest-adk eval`'s output. To see them again, set
+  the environment variable:
+
+  ```bash
+  PYTHONWARNINGS=always::UserWarning pytest-adk eval https://my-agent.example.com tests/evals/
+  ```
+
+  The interpreter's `-W` option does the same thing but cannot be used here:
+  `-W` has to be consumed by `python` itself, so `pytest-adk eval -W ...`
+  would just pass `-W` to pytest-adk's own argument parser, which rejects it.
+
+  On **google-adk 1.30.0 and 1.31.0** one warning still gets through:
+  `[EXPERIMENTAL] feature FeatureName.PLUGGABLE_AUTH is enabled.` It is
+  emitted while `google.adk` is being imported, which happens during
+  `import pytest_adk` — before `pytest-adk eval` runs and can install any
+  filter. Suppressing it would mean filtering warnings at package import
+  time, which would also silence them for the pytest plugin and for anything
+  else importing pytest-adk, so it is deliberately left alone. google-adk
+  1.32.0 stopped emitting it; upgrading is the fix.
+
+  Warnings raised by your own agent or custom metric code are unaffected —
+  with one exception: the `[EXPERIMENTAL]` rule matches on message text alone,
+  so a `UserWarning` of your own whose message *starts with* `[EXPERIMENTAL]`
+  is suppressed too. Rename such a warning, or use `PYTHONWARNINGS` as above.

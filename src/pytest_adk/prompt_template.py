@@ -9,7 +9,10 @@ inlining a (often long) prompt in every eval case. When the entire value of a
 
 the referenced file is read and its placeholders are substituted with the values
 from the marker. This lets several eval cases share one common prompt file while
-only varying a few variables.
+only varying a few variables. A file name or a value that contains whitespace
+can be quoted::
+
+    <prompt:"my prompt.txt" ROOM="living room">
 
 Two rendering engines are supported. The default ``'string'`` engine uses
 Python's :class:`string.Template` (``${VAR}`` syntax). The optional ``'jinja'``
@@ -38,6 +41,9 @@ _PROMPT_MARKER_RE = re.compile(r'^<prompt:(?P<body>.+)>$', re.DOTALL)
 # the historical ``string.Template`` behavior; ``'jinja'`` opts into Jinja2.
 _DEFAULT_ENGINE = 'string'
 _VALID_ENGINES = ('string', 'jinja')
+
+# Quote characters that group whitespace into a single marker token.
+_QUOTE_CHARS = '"\''
 
 
 def _render_string_template(
@@ -104,6 +110,73 @@ def _render_prompt(
   )
 
 
+def _split_marker_body(body: str) -> list[str]:
+  r"""Split a marker body into a file name and ``KEY=VALUE`` tokens.
+
+  Tokens are whitespace-separated, and a quote (``"`` or ``'``) groups
+  whitespace into one token -- but only in the two positions the documented
+  forms use: at the start of a token (a quoted file name) and right after the
+  first ``=`` of a pair (a quoted value)::
+
+      "my prompt.txt" ROOM="living room"
+
+  Everywhere else a quote is an ordinary character, so a value such as
+  ``AUTHOR=O'Reilly's`` keeps its apostrophes instead of being read as quoting
+  syntax. There is no backslash escaping either: ``PATTERN=\d+`` keeps its
+  backslash, and ``#`` starts no comment. That keeps every marker that worked
+  when the body was simply split on whitespace working unchanged; quoting is
+  purely additive.
+
+  This is why :func:`shlex.split` is not used directly: it runs in POSIX mode,
+  where a backslash escapes the next character and a quote is syntax wherever
+  it appears.
+
+  Args:
+      body: The text between ``<prompt:`` and the closing ``>``.
+
+  Returns:
+      The tokens, with the delimiting quotes removed.
+
+  Raises:
+      ValueError: If a quote that opens a quoted run is never closed.
+  """
+  tokens: list[str] = []
+  index = 0
+  length = len(body)
+
+  while index < length:
+    if body[index].isspace():
+      index += 1
+      continue
+
+    chars: list[str] = []
+    # Position at which a quote would open a quoted run: the token start,
+    # then (once the first ``=`` is consumed) the start of the value.
+    quote_opens_at = index
+    equals_seen = False
+
+    while index < length and not body[index].isspace():
+      char = body[index]
+      if char in _QUOTE_CHARS and index == quote_opens_at:
+        closing = body.find(char, index + 1)
+        if closing == -1:
+          raise ValueError(
+              f'no closing {char} quotation mark'
+          )
+        chars.append(body[index + 1 : closing])
+        index = closing + 1
+        continue
+      chars.append(char)
+      index += 1
+      if char == '=' and not equals_seen:
+        equals_seen = True
+        quote_opens_at = index
+
+    tokens.append(''.join(chars))
+
+  return tokens
+
+
 def _expand_text(
     text: str | None, base_dir: Path, engine: str = _DEFAULT_ENGINE
 ) -> str | None:
@@ -115,15 +188,20 @@ def _expand_text(
   """
   if text is None:
     return text
-  match = _PROMPT_MARKER_RE.match(text.strip())
+  marker = text.strip()
+  match = _PROMPT_MARKER_RE.match(marker)
   if match is None:
     return text
 
-  tokens = match.group('body').split()
+  try:
+    tokens = _split_marker_body(match.group('body'))
+  except ValueError as error:
+    raise ValueError(
+        f'Failed to parse prompt template marker {marker!r}: {error}.'
+    ) from error
   if not tokens:
     raise ValueError(
-        'Prompt template marker is missing a file name: '
-        f'{text.strip()!r}.'
+        f'Prompt template marker is missing a file name: {marker!r}.'
     )
   filename, *assignments = tokens
 
@@ -133,7 +211,7 @@ def _expand_text(
     if not sep or not key:
       raise ValueError(
           f'Invalid variable assignment {assignment!r} in prompt template'
-          f' marker {text.strip()!r}; expected KEY=VALUE.'
+          f' marker {marker!r}; expected KEY=VALUE.'
       )
     variables[key] = value
 
@@ -141,7 +219,7 @@ def _expand_text(
   if not prompt_path.is_file():
     raise FileNotFoundError(
         f'Prompt template file not found: {prompt_path} (referenced by'
-        f' {text.strip()!r}).'
+        f' {marker!r}).'
     )
 
   return _render_prompt(
@@ -149,7 +227,7 @@ def _expand_text(
       variables,
       engine,
       filename=filename,
-      marker=text.strip(),
+      marker=marker,
   )
 
 
