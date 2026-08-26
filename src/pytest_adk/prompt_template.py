@@ -9,7 +9,10 @@ inlining a (often long) prompt in every eval case. When the entire value of a
 
 the referenced file is read and its placeholders are substituted with the values
 from the marker. This lets several eval cases share one common prompt file while
-only varying a few variables.
+only varying a few variables. The marker body is split with :func:`shlex.split`,
+so a file name or a value containing whitespace can be quoted::
+
+    <prompt:"my prompt.txt" ROOM="living room">
 
 Two rendering engines are supported. The default ``'string'`` engine uses
 Python's :class:`string.Template` (``${VAR}`` syntax). The optional ``'jinja'``
@@ -24,6 +27,7 @@ evaluator, so the agent always sees the fully rendered prompt.
 from __future__ import annotations
 
 import re
+import shlex
 import string
 from pathlib import Path
 
@@ -115,15 +119,22 @@ def _expand_text(
   """
   if text is None:
     return text
-  match = _PROMPT_MARKER_RE.match(text.strip())
+  marker = text.strip()
+  match = _PROMPT_MARKER_RE.match(marker)
   if match is None:
     return text
 
-  tokens = match.group('body').split()
+  # ``shlex.split`` (rather than ``str.split``) so that a quoted file name or
+  # variable value may contain whitespace: ``ROOM="living room"``.
+  try:
+    tokens = shlex.split(match.group('body'))
+  except ValueError as error:
+    raise ValueError(
+        f'Failed to parse prompt template marker {marker!r}: {error}.'
+    ) from error
   if not tokens:
     raise ValueError(
-        'Prompt template marker is missing a file name: '
-        f'{text.strip()!r}.'
+        f'Prompt template marker is missing a file name: {marker!r}.'
     )
   filename, *assignments = tokens
 
@@ -133,7 +144,7 @@ def _expand_text(
     if not sep or not key:
       raise ValueError(
           f'Invalid variable assignment {assignment!r} in prompt template'
-          f' marker {text.strip()!r}; expected KEY=VALUE.'
+          f' marker {marker!r}; expected KEY=VALUE.'
       )
     variables[key] = value
 
@@ -141,7 +152,7 @@ def _expand_text(
   if not prompt_path.is_file():
     raise FileNotFoundError(
         f'Prompt template file not found: {prompt_path} (referenced by'
-        f' {text.strip()!r}).'
+        f' {marker!r}).'
     )
 
   return _render_prompt(
@@ -149,7 +160,7 @@ def _expand_text(
       variables,
       engine,
       filename=filename,
-      marker=text.strip(),
+      marker=marker,
   )
 
 

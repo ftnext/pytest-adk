@@ -91,6 +91,58 @@ def test_missing_prompt_file_raises(tmp_path) -> None:
     _expand_prompt_templates(eval_set, tmp_path)
 
 
+def test_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Turn on the ${ROOM} light.', encoding='utf-8'
+  )
+  eval_set = _eval_set_with_text('<prompt:prompt.txt ROOM="living room">')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Turn on the living room light.'
+
+
+def test_single_quoted_value_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Say ${MESSAGE}.', encoding='utf-8')
+  eval_set = _eval_set_with_text(
+      "<prompt:prompt.txt MESSAGE='こんにちは 世界'>"
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Say こんにちは 世界.'
+
+
+def test_quoted_file_name_may_contain_spaces(tmp_path) -> None:
+  (tmp_path / 'my prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:"my prompt.txt" VAR1=world>')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Hello world'
+
+
+def test_quoted_value_may_be_empty(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('[${VAR1}]', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1="">')
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == '[]'
+
+
+def test_unbalanced_quote_raises(tmp_path) -> None:
+  (tmp_path / 'prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
+  eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1="unclosed>')
+
+  with pytest.raises(ValueError, match='quot'):
+    _expand_prompt_templates(eval_set, tmp_path)
+
+
 def test_invalid_assignment_raises(tmp_path) -> None:
   (tmp_path / 'prompt.txt').write_text('${VAR1}', encoding='utf-8')
   eval_set = _eval_set_with_text('<prompt:prompt.txt VAR1>')
@@ -146,6 +198,37 @@ def test_toml_evalset_is_expanded_via_loader(tmp_path) -> None:
 
   text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
   assert text == 'Please turn on the living light.'
+
+
+_QUOTED_TOML_EVALSET = """\
+eval_set_id = "home_automation"
+
+[[eval_cases]]
+eval_id = "turn_on_living_room"
+
+[[eval_cases.conversation]]
+invocation_id = "inv-1"
+
+[eval_cases.conversation.user_content]
+role = "user"
+parts = [ { text = '<prompt:prompt.txt ROOM="living room">' } ]
+"""
+
+
+def test_toml_evalset_with_quoted_value_is_expanded_via_loader(
+    tmp_path,
+) -> None:
+  (tmp_path / 'prompt.txt').write_text(
+      'Please turn on the ${ROOM} light.', encoding='utf-8'
+  )
+  test_file = tmp_path / 'cases.test.toml'
+  test_file.write_text(_QUOTED_TOML_EVALSET, encoding='utf-8')
+
+  eval_set = evaluation_module._load_eval_set_from_toml(test_file)
+  _expand_prompt_templates(eval_set, test_file.parent)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == 'Please turn on the living room light.'
 
 
 def test_jinja_engine_expands_double_brace_placeholders(tmp_path) -> None:
