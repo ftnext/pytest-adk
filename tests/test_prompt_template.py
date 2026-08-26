@@ -11,6 +11,7 @@ from google.genai import types
 
 import pytest_adk.evaluation as evaluation_module
 from pytest_adk.prompt_template import _expand_prompt_templates
+from pytest_adk.prompt_template import _split_marker_body
 
 
 def _eval_set_with_text(user_text: str, final_text: str | None = None) -> EvalSet:
@@ -151,17 +152,46 @@ def test_backslashes_in_values_are_literal(tmp_path) -> None:
   assert text == r'Match \d+ in C:\dir\file.txt.'
 
 
-def test_backslashes_in_file_name_are_literal(tmp_path) -> None:
-  # A backslash-separated relative path keeps its separator; on POSIX that is
-  # a (weird but valid) file name, which is exactly what str.split() used to
-  # look up.
-  subdir = tmp_path / 'subdir'
-  subdir.mkdir()
-  (subdir / 'prompt.txt').write_text('Hello ${VAR1}', encoding='utf-8')
-  eval_set = _eval_set_with_text(r'<prompt:subdir\prompt.txt VAR1=world>')
+def test_backslashes_in_file_name_are_literal() -> None:
+  # Asserted on the splitter rather than on the resolved path: whether
+  # ``subdir\prompt.txt`` names one file or two directories is a platform
+  # question, but the marker must reach ``Path`` with its backslash intact.
+  assert _split_marker_body(r'subdir\prompt.txt VAR1=world') == [
+      r'subdir\prompt.txt',
+      'VAR1=world',
+  ]
 
-  with pytest.raises(FileNotFoundError, match=r'subdir\\prompt.txt'):
-    _expand_prompt_templates(eval_set, tmp_path)
+
+def test_apostrophe_in_unquoted_value_is_literal(tmp_path) -> None:
+  # Quotes delimit only the quoted forms; one inside an unquoted token is an
+  # ordinary character, so ``MESSAGE=don't`` is not an unclosed quote.
+  (tmp_path / 'prompt.txt').write_text('${AUTHOR} says ${MESSAGE}', encoding='utf-8')
+  eval_set = _eval_set_with_text(
+      "<prompt:prompt.txt AUTHOR=O'Reilly's MESSAGE=don't>"
+  )
+
+  _expand_prompt_templates(eval_set, tmp_path)
+
+  text = eval_set.eval_cases[0].conversation[0].user_content.parts[0].text
+  assert text == "O'Reilly's says don't"
+
+
+def test_quote_inside_unquoted_value_is_literal() -> None:
+  assert _split_marker_body('prompt.txt Q=say"hi" A=it\'s') == [
+      'prompt.txt',
+      'Q=say"hi"',
+      "A=it's",
+  ]
+
+
+def test_quotes_open_only_at_a_token_or_value_start() -> None:
+  # The two documented quoted forms: a quoted file name, and a quoted value
+  # right after ``=``.
+  assert _split_marker_body('"my prompt.txt" ROOM="living room" N=1') == [
+      'my prompt.txt',
+      'ROOM=living room',
+      'N=1',
+  ]
 
 
 def test_hash_in_value_is_not_a_comment(tmp_path) -> None:
