@@ -1150,6 +1150,35 @@ def _find_duplicate_eval_set_id(
   return None
 
 
+_ANSI_GREEN = '\x1b[32m'
+_ANSI_RED = '\x1b[31m'
+_ANSI_RESET = '\x1b[0m'
+
+
+def _colorize(text: str, color: str, *, stream) -> str:
+  """Wraps ``text`` in an ANSI color code if ``stream`` looks like a color-capable tty.
+
+  Colorizing is skipped (returning ``text`` unchanged) when ``stream`` is not a
+  tty (e.g. piped output, or pytest's ``capsys``), when ``NO_COLOR`` is set
+  (see https://no-color.org), or when ``TERM=dumb``. No new dependency is
+  introduced for this -- raw ANSI escape codes are used directly.
+
+  Args:
+      text: The text to colorize.
+      color: One of the ``_ANSI_*`` color constants.
+      stream: The stream ``text`` is about to be printed to; its ``isatty()``
+          is what gates colorization, since stdout and stderr can differ.
+  """
+  isatty = getattr(stream, 'isatty', None)
+  if not callable(isatty) or not isatty():
+    return text
+  if os.environ.get('NO_COLOR'):
+    return text
+  if os.environ.get('TERM') == 'dumb':
+    return text
+  return f'{color}{text}{_ANSI_RESET}'
+
+
 async def _run_and_evaluate_eval_set(
     service,
     results_manager: LocalEvalSetResultsManager,
@@ -1212,8 +1241,9 @@ async def _run_and_evaluate_eval_set(
       success_results.append(inference_result)
     else:
       had_inference_failure = True
+      prefix = _colorize('INFERENCE FAILED', _ANSI_RED, stream=sys.stderr)
       print(
-          f"INFERENCE FAILED for eval set '{eval_set.eval_set_id}' eval case"
+          f"{prefix} for eval set '{eval_set.eval_set_id}' eval case"
           f" '{inference_result.eval_case_id}': {inference_result.error_message}",
           file=sys.stderr,
       )
@@ -1273,11 +1303,14 @@ def _print_eval_case_result(
     if metric_passed and not print_detailed_results:
       continue
     status_label = 'PASSED' if metric_passed else metric_result.eval_status.name
+    target_stream = sys.stdout if metric_passed else sys.stderr
+    color = _ANSI_GREEN if metric_passed else _ANSI_RED
+    status_label = _colorize(status_label, color, stream=target_stream)
     print(
         f'[{eval_case_result.eval_id}] {metric_result.metric_name}:'
         f' score={metric_result.score} threshold={metric_result.threshold}'
         f' status={status_label}',
-        file=sys.stdout if metric_passed else sys.stderr,
+        file=target_stream,
     )
   return case_failed
 
