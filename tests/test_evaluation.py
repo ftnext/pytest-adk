@@ -383,8 +383,10 @@ def test_salvage_without_hard_links_leaves_no_empty_results(
   """The no-hard-link fallback must not stage empty files at result names.
 
   The exclusive-create claim goes to a hidden ``.lock`` name, so no
-  ``*.evalset_result.json`` name ever exists without its full content; on
-  success the lock is removed and collisions still dedupe with ``-2``.
+  ``*.evalset_result.json`` name ever exists without its full content;
+  collisions still dedupe with ``-2``, and the lock of a published name is
+  kept as a permanent claim (invisible to suffix-based discovery) so no
+  later mover can race an overwrite onto it.
   """
 
   def _no_hard_links(src, dst, **kwargs):
@@ -416,7 +418,15 @@ def test_salvage_without_hard_links_leaves_no_empty_results(
   assert json.loads(duplicate.read_text(encoding='utf-8')) == {'second': True}
   assert not staging_dir.exists()
   leftover_names = sorted(p.name for p in history_dir.iterdir())
-  assert leftover_names == sorted([existing.name, duplicate.name])
+  assert leftover_names == sorted(
+      [existing.name, duplicate.name, f'.{duplicate.name}.lock']
+  )
+  # The permanent claim never shadows a result: suffix-based discovery
+  # (how ADK lists eval history) sees exactly the two real files.
+  discovered = sorted(
+      p.name for p in history_dir.glob('*.evalset_result.json')
+  )
+  assert discovered == sorted([existing.name, duplicate.name])
 
 
 @pytest.mark.asyncio

@@ -187,11 +187,20 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
           counter += 1
           continue
         if candidate.exists():
+          # Claimed a name someone already published to (they used os.link,
+          # or predate the lock protocol). Nothing was or will be replaced
+          # here, so releasing the lock is safe: any later claimer re-runs
+          # this same exists() check and also skips.
           lock.unlink(missing_ok=True)
           counter += 1
           continue
         os.replace(path, candidate)
-        lock.unlink(missing_ok=True)
+        # The lock is deliberately kept as a permanent, one-shot claim on
+        # this published name. Releasing it would let a later mover claim
+        # the same lock and reach its own exists()/replace with this file
+        # already present -- reopening the overwrite race the lock exists
+        # to close. Locks accrue only on the no-hard-link salvage path,
+        # and their names are invisible to ADK's suffix-based discovery.
         return
       path.unlink()
       return
