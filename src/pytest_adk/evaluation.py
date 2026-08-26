@@ -52,6 +52,12 @@ _STAGING_PREFIX = '.staging-'
 # A staging directory quiet for this long is considered abandoned by a killed
 # process and gets recovered; younger ones may belong to a save in flight.
 _STAGING_RECOVERY_AGE_SECONDS = 3600
+# Working-copy names inside staging. Suffix-less, so they can never be taken
+# for results. The publishable copy is what publication hard-links into
+# history: its link count doubles as crash-safe proof that publication
+# happened, which recovery consults before touching the staged original.
+_PUBLISHABLE_NAME = '.publishable.tmp'
+_ALIGNING_NAME = '.aligning.tmp'
 
 
 class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
@@ -117,8 +123,12 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
         try:
           self._publish_readable(staged[0], history_dir)
           # Published under the readable name; drop the staged original so
-          # the salvage below does not publish it a second time.
+          # the salvage below does not publish it a second time. The
+          # working copy goes second: until the original is gone, its
+          # link count remains the physical proof of publication that
+          # recovery consults if this process dies mid-cleanup.
           staged[0].unlink()
+          staged[0].with_name(_PUBLISHABLE_NAME).unlink(missing_ok=True)
         except Exception:  # noqa: BLE001 - salvage publishes it as-is
           pass
     finally:
@@ -179,8 +189,22 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     for path in sorted(staging_dir.rglob('*')):
       if not path.is_file():
         continue
+      if path.name in (_PUBLISHABLE_NAME, _ALIGNING_NAME):
+        # Working copies, not results. The publishable one doubles as the
+        # publication proof consulted below; the staged original remains
+        # authoritative for both.
+        continue
       destination = Path(self._results_root) / path.relative_to(staging_dir)
       if destination.name.endswith(_RESULT_FILE_SUFFIX):
+        if self._publication_proven(path.with_name(_PUBLISHABLE_NAME)):
+          # Physical proof, not a content heuristic: publication hard-links
+          # the working copy to its final name, so a link count above one
+          # means this directory's save already reached history. Skipping
+          # the original is then deduplication of the very same save. A
+          # content comparison could never establish this -- a distinct
+          # run with identical output must be salvaged, and without proof
+          # it is.
+          continue
         payload = self._load_result_document(path)
         if payload is None:
           # A killed ADK write can leave a truncated document, and age
@@ -188,20 +212,23 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
           # preserved for inspection, but invisible to suffix-based
           # discovery, so ADK never serves a corrupt result.
           destination = destination.with_name(destination.name + '.invalid')
-        elif self._already_published(destination.parent, payload):
-          # The readable copy most likely reached history before the
-          # process died with the staged original still in place. But even
-          # full content equality cannot prove two documents are the same
-          # run -- a deterministic eval plus a coarse clock can produce
-          # identical distinct runs -- so nothing is deleted: the original
-          # is parked under a non-discoverable .duplicate name, off ADK's
-          # listing yet preserved byte-for-byte for a human to adjudicate.
-          destination = destination.with_name(
-              destination.name + '.duplicate'
-          )
       destination.parent.mkdir(parents=True, exist_ok=True)
       self._move_without_overwrite(path, destination)
     shutil.rmtree(staging_dir, ignore_errors=True)
+
+  @staticmethod
+  def _publication_proven(publishable: Path) -> bool:
+    """Whether this staging directory's save provably reached history.
+
+    Publication hard-links the rewritten working copy to its final name,
+    so a working copy whose link count exceeds one is physical evidence
+    that the published file exists in history. This is the only condition
+    under which salvage skips a result document.
+    """
+    try:
+      return publishable.stat().st_nlink >= 2
+    except OSError:
+      return False
 
   @staticmethod
   def _load_result_document(path: Path) -> dict | None:
@@ -211,38 +238,6 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     except (OSError, ValueError):
       return None
     return payload if isinstance(payload, dict) else None
-
-  @classmethod
-  def _already_published(cls, history_dir: Path, payload: dict) -> bool:
-    """Whether this exact document is already discoverable in history.
-
-    Duplicate means field-for-field equality after dropping the two id
-    fields that publication (and salvage alignment) rewrite. A timestamp
-    key alone would not do: ``time.time()`` can tick coarsely (~15ms on
-    older Windows Pythons), so two distinct same-second runs of one eval
-    set may share ``(eval_set_id, creation_timestamp)`` -- and a distinct
-    result must be salvaged, never dropped as a duplicate.
-    """
-    if not history_dir.is_dir():
-      return False
-    staged_content = cls._without_rewritten_ids(payload)
-    for existing in history_dir.glob('*' + _RESULT_FILE_SUFFIX):
-      published = cls._load_result_document(existing)
-      if (
-          published is not None
-          and cls._without_rewritten_ids(published) == staged_content
-      ):
-        return True
-    return False
-
-  @staticmethod
-  def _without_rewritten_ids(payload: dict) -> dict:
-    """Drops the fields that publication rewrites, for content comparison."""
-    return {
-        key: value
-        for key, value in payload.items()
-        if key not in ('eval_set_result_id', 'eval_set_result_name')
-    }
 
   @staticmethod
   def _numbered(destination: Path, counter: int) -> Path:
@@ -346,7 +341,7 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     # place: the aligned document goes to a staging-local sibling and lands
     # via atomic replace. If that fails (disk full, ...), the original moves
     # on unaligned rather than risking corruption.
-    aligned = path.with_name('.aligning.tmp')
+    aligned = path.with_name(_ALIGNING_NAME)
     try:
       aligned.write_text(json.dumps(payload, indent=2), encoding='utf-8')
       os.replace(aligned, path)
@@ -373,37 +368,38 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     # The rewritten document lives next to ``saved`` in staging, keeping
     # ``saved`` pristine for the caller's fail-soft path. Its name avoids the
     # result-file suffix so the salvage pass can never mistake this working
-    # copy for a result, and it is removed here in every outcome.
-    publishable = saved.with_name('.publishable.tmp')
-    try:
-      stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
-      counter = 1
-      while True:
-        numbering = '' if counter == 1 else f'-{counter}'
-        target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
-        # Keep the embedded id in step with the name about to be claimed,
-        # before anything is published. creation_timestamp is deliberately
-        # left as the raw unix float: adk web compares it to find the most
-        # recent run for an eval set.
-        new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
-        payload['eval_set_result_id'] = new_stem
-        payload['eval_set_result_name'] = new_stem
-        publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-        try:
-          # link() atomically claims the name -- a concurrent save (another
-          # process writing the same app/eval set in the same second) gets
-          # FileExistsError and moves on to the next counter instead of
-          # silently overwriting this result -- and publishes the complete
-          # rewritten document in the same step, so no empty or partial file
-          # ever appears under a ``*.evalset_result.json`` name, even if
-          # this process dies mid-save.
-          os.link(publishable, target)
-        except FileExistsError:
-          counter += 1
-          continue
-        return
-    finally:
-      publishable.unlink(missing_ok=True)
+    # copy for a result. It is deliberately NOT removed here: after a
+    # successful link its link count is the crash-safe proof of publication
+    # (the caller removes it only after the staged original is gone), and on
+    # failure it carries no unique data and is swept out with the staging
+    # tree.
+    publishable = saved.with_name(_PUBLISHABLE_NAME)
+    stamp = datetime.now().strftime(_LOCAL_DATETIME_FORMAT)
+    counter = 1
+    while True:
+      numbering = '' if counter == 1 else f'-{counter}'
+      target = history_dir / f'{base}_{stamp}{numbering}{_RESULT_FILE_SUFFIX}'
+      # Keep the embedded id in step with the name about to be claimed,
+      # before anything is published. creation_timestamp is deliberately
+      # left as the raw unix float: adk web compares it to find the most
+      # recent run for an eval set.
+      new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
+      payload['eval_set_result_id'] = new_stem
+      payload['eval_set_result_name'] = new_stem
+      publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+      try:
+        # link() atomically claims the name -- a concurrent save (another
+        # process writing the same app/eval set in the same second) gets
+        # FileExistsError and moves on to the next counter instead of
+        # silently overwriting this result -- and publishes the complete
+        # rewritten document in the same step, so no empty or partial file
+        # ever appears under a ``*.evalset_result.json`` name, even if
+        # this process dies mid-save.
+        os.link(publishable, target)
+      except FileExistsError:
+        counter += 1
+        continue
+      return
 
 
 def _load_eval_set_from_toml(eval_set_file: str | Path) -> EvalSet:

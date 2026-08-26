@@ -558,16 +558,13 @@ def test_recovery_quarantines_truncated_results(tmp_path) -> None:
   assert not staging_dir.exists()
 
 
-def test_recovery_parks_already_published_original_as_duplicate(
-    tmp_path,
-) -> None:
-  """A staged original whose content already reached history is parked.
+def test_recovery_skips_original_with_publication_proof(tmp_path) -> None:
+  """A hard-link-proven published save is not republished by recovery.
 
   Dying between the readable publish and the staged original's unlink
-  leaves the original behind; salvaging it normally would list one
-  evaluation twice, but deleting it could destroy a distinct run that
-  merely looks identical. It is moved to a non-discoverable .duplicate
-  name instead: off ADK's listing, preserved byte-for-byte.
+  leaves the original behind next to the publishable working copy, whose
+  link count (shared inode with the published file) is physical proof the
+  save reached history. Only then may recovery skip the original.
   """
   manager = evaluation_module._ReadableNameEvalSetResultsManager(
       agents_dir=str(tmp_path)
@@ -575,62 +572,36 @@ def test_recovery_parks_already_published_original_as_duplicate(
   history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
   readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
   readable_stem = readable_name.removesuffix('.evalset_result.json')
+  document = {
+      'eval_set_result_id': readable_stem,
+      'eval_set_result_name': readable_stem,
+      'eval_set_id': 'single.test',
+      'creation_timestamp': 111.5,
+  }
   published = history_dir / readable_name
   published.parent.mkdir(parents=True)
-  published.write_text(
-      json.dumps(
-          {
-              'eval_set_result_id': readable_stem,
-              'eval_set_result_name': readable_stem,
-              'eval_set_id': 'single.test',
-              'creation_timestamp': 111.5,
-          }
-      ),
-      encoding='utf-8',
-  )
+  published.write_text(json.dumps(document), encoding='utf-8')
   staging_dir = history_dir / '.staging-test'
   original_name = 'test_app_single.test_111.5.evalset_result.json'
   staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
   staged.parent.mkdir(parents=True)
-  staged.write_text(
-      json.dumps(
-          {
-              'eval_set_result_id': original_name.removesuffix(
-                  '.evalset_result.json'
-              ),
-              'eval_set_id': 'single.test',
-              'creation_timestamp': 111.5,
-          }
-      ),
-      encoding='utf-8',
-  )
+  staged.write_text(json.dumps(document), encoding='utf-8')
+  # The crash left the publishable working copy hard-linked to the
+  # published file -- exactly what a successful os.link publish produces.
+  os.link(published, staged.with_name('.publishable.tmp'))
 
   manager._salvage_staging(staging_dir)
 
-  parked_name = f'{original_name}.duplicate'
-  assert sorted(p.name for p in history_dir.iterdir()) == sorted(
-      [readable_name, parked_name]
-  )
-  # Discovery sees exactly one run; the parked original keeps its bytes.
-  assert [p.name for p in history_dir.glob('*.evalset_result.json')] == [
-      readable_name
-  ]
-  parked = json.loads(
-      (history_dir / parked_name).read_text(encoding='utf-8')
-  )
-  assert parked['creation_timestamp'] == 111.5
+  assert [p.name for p in history_dir.iterdir()] == [readable_name]
   assert not staging_dir.exists()
 
 
-def test_recovery_keeps_distinct_result_despite_timestamp_collision(
-    tmp_path,
-) -> None:
-  """Matching timestamps alone must never classify a result as duplicate.
+def test_recovery_salvages_identical_content_without_proof(tmp_path) -> None:
+  """Content equality alone must never hide or drop a staged result.
 
-  time.time() can tick coarsely (~15ms on older Windows Pythons), so two
-  distinct runs may share (eval_set_id, creation_timestamp). Only full
-  content equality (minus the rewritten id fields) may drop a staged
-  original; differing content must be salvaged.
+  A deterministic eval plus a coarse clock can make two distinct runs
+  byte-identical, so without the hard-link publication proof the staged
+  original is salvaged normally -- history then rightly lists two runs.
   """
   manager = evaluation_module._ReadableNameEvalSetResultsManager(
       agents_dir=str(tmp_path)
@@ -639,39 +610,24 @@ def test_recovery_keeps_distinct_result_despite_timestamp_collision(
   readable_name = 'test_app_single.test_20260826-123456.evalset_result.json'
   published = history_dir / readable_name
   published.parent.mkdir(parents=True)
-  published.write_text(
-      json.dumps(
-          {
-              'eval_set_id': 'single.test',
-              'creation_timestamp': 111.5,
-              'eval_case_results': ['run-one'],
-          }
-      ),
-      encoding='utf-8',
-  )
+  content = {
+      'eval_set_id': 'single.test',
+      'creation_timestamp': 111.5,
+      'eval_case_results': ['identical-run'],
+  }
+  published.write_text(json.dumps(content), encoding='utf-8')
   staging_dir = history_dir / '.staging-test'
   original_name = 'test_app_single.test_111.5.evalset_result.json'
   staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / original_name
   staged.parent.mkdir(parents=True)
-  staged.write_text(
-      json.dumps(
-          {
-              'eval_set_id': 'single.test',
-              'creation_timestamp': 111.5,
-              'eval_case_results': ['run-two'],
-          }
-      ),
-      encoding='utf-8',
-  )
+  staged.write_text(json.dumps(content), encoding='utf-8')
 
   manager._salvage_staging(staging_dir)
 
-  salvaged = history_dir / original_name
-  assert (
-      json.loads(salvaged.read_text(encoding='utf-8'))['eval_case_results']
-      == ['run-two']
+  discovered = sorted(
+      p.name for p in history_dir.glob('*.evalset_result.json')
   )
-  assert published.exists()
+  assert discovered == sorted([readable_name, original_name])
   assert not staging_dir.exists()
 
 
