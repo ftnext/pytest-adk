@@ -68,8 +68,19 @@ def _dump_result_document(payload: dict) -> str:
   ``model_dump_json``, which emits them as UTF-8, so republishing the
   document under a readable name must not turn them into ``\uXXXX``
   escapes on the way back out.
+
+  A document whose text has no UTF-8 form at all -- ``json.loads`` accepts
+  an escaped lone surrogate such as ``\ud800`` -- falls back to the escaped
+  form. Writing it would otherwise raise ``UnicodeEncodeError``, which no
+  caller expects: it would abort a salvage pass mid-way and strand the
+  results it had not moved yet.
   """
-  return json.dumps(payload, indent=2, ensure_ascii=False)
+  readable = json.dumps(payload, indent=2, ensure_ascii=False)
+  try:
+    readable.encode('utf-8')
+  except UnicodeEncodeError:
+    return json.dumps(payload, indent=2)
+  return readable
 
 
 class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):

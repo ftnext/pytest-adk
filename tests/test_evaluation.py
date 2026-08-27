@@ -520,6 +520,44 @@ def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
   assert 'にほんご' in duplicate.read_text(encoding='utf-8')
 
 
+def test_salvage_publishes_a_document_with_no_utf8_form(tmp_path) -> None:
+  """Text that cannot be encoded as UTF-8 must not abort a salvage pass.
+
+  ``json.loads`` accepts an escaped lone surrogate (``\\ud800``), and the
+  string it produces has no UTF-8 form. Serializing the realigned document
+  falls back to the escaped form so the write still succeeds -- an
+  unwritable document would raise out of the salvage and strand every
+  result it had not moved yet.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+  history_dir = tmp_path / 'test_app' / '.adk' / 'eval_history'
+  name = 'test_app_single.test_123.5.evalset_result.json'
+  stem = name.removesuffix('.evalset_result.json')
+  document = (
+      '{"eval_set_result_id": "' + stem + '", '
+      '"eval_set_result_name": "' + stem + '", '
+      '"creation_timestamp": 123.5, "marker": "\\ud800"}'
+  )
+  existing = history_dir / name
+  existing.parent.mkdir(parents=True)
+  existing.write_text(document, encoding='utf-8')
+  staging_dir = history_dir / '.staging-test'
+  staged = staging_dir / 'test_app' / '.adk' / 'eval_history' / name
+  staged.parent.mkdir(parents=True)
+  staged.write_text(document, encoding='utf-8')
+
+  manager._salvage_staging(staging_dir)
+
+  duplicate = history_dir / 'test_app_single.test_123.5-2.evalset_result.json'
+  duplicate_stem = duplicate.name.removesuffix('.evalset_result.json')
+  second = json.loads(duplicate.read_text(encoding='utf-8'))
+  assert second['eval_set_result_id'] == duplicate_stem
+  assert second['eval_set_result_name'] == duplicate_stem
+  assert second['marker'] == '\ud800'
+
+
 def test_failed_id_alignment_still_salvages_the_original(
     tmp_path, monkeypatch
 ) -> None:
