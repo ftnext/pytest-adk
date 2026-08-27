@@ -60,6 +60,18 @@ _PUBLISHABLE_NAME = '.publishable.tmp'
 _ALIGNING_NAME = '.aligning.tmp'
 
 
+def _dump_result_document(payload: dict) -> str:
+  r"""Serializes a result document the way ADK itself writes one.
+
+  ``ensure_ascii=False`` keeps multibyte text -- Japanese prompts and
+  responses, ... -- readable: ADK writes results through pydantic's
+  ``model_dump_json``, which emits them as UTF-8, so republishing the
+  document under a readable name must not turn them into ``\uXXXX``
+  escapes on the way back out.
+  """
+  return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
   """LocalEvalSetResultsManager that names files by local datetime.
 
@@ -343,7 +355,7 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
     # on unaligned rather than risking corruption.
     aligned = path.with_name(_ALIGNING_NAME)
     try:
-      aligned.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+      aligned.write_text(_dump_result_document(payload), encoding='utf-8')
       os.replace(aligned, path)
     except OSError:
       with contextlib.suppress(OSError):
@@ -386,7 +398,7 @@ class _ReadableNameEvalSetResultsManager(LocalEvalSetResultsManager):
       new_stem = target.name.removesuffix(_RESULT_FILE_SUFFIX)
       payload['eval_set_result_id'] = new_stem
       payload['eval_set_result_name'] = new_stem
-      publishable.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+      publishable.write_text(_dump_result_document(payload), encoding='utf-8')
       try:
         # link() atomically claims the name -- a concurrent save (another
         # process writing the same app/eval set in the same second) gets

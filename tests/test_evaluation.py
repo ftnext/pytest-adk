@@ -21,15 +21,17 @@ from google.genai import types
 import pytest_adk.evaluation as evaluation_module
 
 
-def _eval_case_result(eval_id: str, run_index: int = 0) -> EvalCaseResult:
+def _eval_case_result(
+    eval_id: str, run_index: int = 0, *, text: str | None = None
+) -> EvalCaseResult:
   invocation = Invocation(
       userContent=types.Content(
           role='user',
-          parts=[types.Part(text=f'prompt {run_index}')],
+          parts=[types.Part(text=text or f'prompt {run_index}')],
       ),
       finalResponse=types.Content(
           role='model',
-          parts=[types.Part(text=f'response {run_index}')],
+          parts=[types.Part(text=text or f'response {run_index}')],
       ),
   )
   metric_result = EvalMetricResult(
@@ -171,6 +173,33 @@ async def test_agent_evaluator_saves_single_file(
   assert saved_result['eval_set_result_id'] == saved_stem
   assert saved_result['eval_set_result_name'] == saved_stem
   assert isinstance(saved_result['creation_timestamp'], float)
+
+
+def test_saved_result_keeps_multibyte_text_unescaped(tmp_path) -> None:
+  """Publishing under the readable name must not escape non-ASCII text.
+
+  ADK writes results as UTF-8 (pydantic's ``model_dump_json``), so the
+  readable-name path -- which re-serializes the document -- has to leave
+  Japanese prompts and responses readable rather than turning them into
+  ``\\uXXXX`` escapes.
+  """
+  manager = evaluation_module._ReadableNameEvalSetResultsManager(
+      agents_dir=str(tmp_path)
+  )
+
+  manager.save_eval_set_result(
+      'test_app',
+      'single.test',
+      [_eval_case_result('case1', text='こんにちは')],
+  )
+
+  saved_files = _saved_result_files(tmp_path)
+  assert len(saved_files) == 1
+  # The raw file text, not the parsed document: json.loads() reads both
+  # forms identically, so only the bytes on disk can tell them apart.
+  raw = saved_files[0].read_text(encoding='utf-8')
+  assert 'こんにちは' in raw
+  assert r'\u3053' not in raw
 
 
 def test_same_second_saves_keep_every_result_file(tmp_path, monkeypatch) -> None:
@@ -467,7 +496,9 @@ def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
               'eval_set_result_name': stem,
               'creation_timestamp': 123.5,
               'marker': 'second',
-          }
+              'note': 'にほんご',
+          },
+          ensure_ascii=False,
       ),
       encoding='utf-8',
   )
@@ -484,6 +515,9 @@ def test_salvage_dedupe_realigns_embedded_ids(tmp_path) -> None:
   assert second['eval_set_result_id'] == duplicate_stem
   assert second['eval_set_result_name'] == duplicate_stem
   assert second['creation_timestamp'] == 123.5
+  # Realigning the ids rewrites the whole document, which must not escape
+  # its multibyte text on the way out.
+  assert 'にほんご' in duplicate.read_text(encoding='utf-8')
 
 
 def test_failed_id_alignment_still_salvages_the_original(
