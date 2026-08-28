@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import contextlib
 import ntpath
 import os
@@ -54,6 +55,7 @@ from typing import NamedTuple
 from typing import Sequence
 
 import httpx
+from google.adk.evaluation import AgentEvaluator as _AdkAgentEvaluator
 from google.adk.evaluation.base_eval_service import EvaluateConfig
 from google.adk.evaluation.base_eval_service import EvaluateRequest
 from google.adk.evaluation.base_eval_service import InferenceConfig
@@ -63,6 +65,7 @@ from google.adk.evaluation.base_eval_service import InferenceStatus
 from google.adk.evaluation.eval_config import EvalConfig
 from google.adk.evaluation.eval_config import get_eval_metrics_from_config
 from google.adk.evaluation.eval_config import get_evaluation_criteria_or_default
+from google.adk.evaluation.eval_metrics import EvalMetricResult
 from google.adk.evaluation.eval_result import EvalCaseResult
 from google.adk.evaluation.eval_set import EvalSet
 from google.adk.evaluation.evaluator import EvalStatus
@@ -569,7 +572,16 @@ def _build_parser() -> argparse.ArgumentParser:
   eval_parser.add_argument(
       '--print-detailed-results',
       action='store_true',
-      help='Additionally print passing metric results, not just failures.',
+      help=(
+          'Report more than just the one-line failures. Adds (a) a one-line'
+          ' result for each *passing* metric, on stdout, and (b) a'
+          ' per-invocation breakdown table for each metric that did not pass,'
+          ' on stderr, showing the prompt alongside the expected and actual'
+          ' response and tool calls. Note this is not the same setting as'
+          " google-adk's own `print_detailed_results` (which the"
+          ' `AgentEvaluator` pytest fixture takes): that one defaults to true'
+          ' and only prints the failure tables.'
+      ),
   )
   return parser
 
@@ -1317,6 +1329,21 @@ async def _run_and_evaluate_eval_set(
       ):
         had_metric_failure = True
 
+    if print_detailed_results:
+      # The one-line results above are per EvalCaseResult, so with --num-runs N
+      # each metric is reported N times. The breakdown tables are per eval
+      # *case* instead: every run of one eval id contributes its invocations to
+      # a single table, matching how ADK's own AgentEvaluator groups them (and
+      # avoiding N copies of the same table). defaultdict keeps insertion
+      # order, so cases are reported in the order evaluate() yielded them.
+      results_by_eval_id: dict[str, list[EvalCaseResult]] = (
+          collections.defaultdict(list)
+      )
+      for eval_case_result in eval_case_results:
+        results_by_eval_id[eval_case_result.eval_id].append(eval_case_result)
+      for eval_id, results_per_eval_id in results_by_eval_id.items():
+        _print_detailed_metric_results(eval_id, results_per_eval_id)
+
   return _EvalSetOutcome(
       had_inference_failure=had_inference_failure,
       had_metric_failure=had_metric_failure,
@@ -1356,6 +1383,130 @@ def _print_eval_case_result(
         file=target_stream,
     )
   return case_failed
+
+
+def _non_passing_metric_results(
+    eval_case_results: list[EvalCaseResult],
+) -> dict[str, EvalMetricResult]:
+  """Returns the first non-passing overall result for each metric, by name.
+
+  A metric is reported as not passing if *any* run of the eval case scored it
+  as anything other than ``PASSED`` -- the same metric can pass on one run and
+  fail on another, and the breakdown exists to explain exactly that.
+
+  Args:
+      eval_case_results: Every run's result for one eval case (one eval id).
+
+  Returns:
+      ``{metric_name: EvalMetricResult}`` for the metrics worth a breakdown,
+      in the order the metrics were scored. The value is the first non-passing
+      result seen, whose ``score``/``threshold`` the summary line reports.
+  """
+  non_passing: dict[str, EvalMetricResult] = {}
+  for eval_case_result in eval_case_results:
+    for metric_result in eval_case_result.overall_eval_metric_results:
+      if metric_result.eval_status == EvalStatus.PASSED:
+        continue
+      non_passing.setdefault(metric_result.metric_name, metric_result)
+  return non_passing
+
+
+def _print_detailed_metric_results(
+    eval_id: str, eval_case_results: list[EvalCaseResult]
+) -> None:
+  """Prints a per-invocation breakdown table for one eval case's failures.
+
+  This is what makes ``--print-detailed-results`` live up to its name: the
+  one-line results say a metric scored below its threshold, this says what the
+  agent actually did. Only metrics that did not pass get a table -- a passing
+  metric has nothing to diagnose, and tabulating every invocation of every
+  metric would grow with ``--num-runs`` for no benefit.
+
+  Everything is written to stderr, alongside the one-line failures, so that a
+  failing run's diagnostics stay on one stream.
+
+  This deliberately does not reuse ``AgentEvaluator._print_details()`` even
+  though the table mirrors its columns. That helper writes to stdout via a
+  bare ``print()``, which would split one failure's reporting across both
+  streams, and it re-derives its own overall score as the mean of the
+  per-invocation scores. The score/threshold printed here come from the same
+  ``overall_eval_metric_results`` entry the one-line result above used, so the
+  breakdown never contradicts the verdict the exit code is derived from.
+
+  Args:
+      eval_id: The eval case id these results belong to.
+      eval_case_results: Every run's result for that eval case.
+  """
+  non_passing = _non_passing_metric_results(eval_case_results)
+  if not non_passing:
+    return
+
+  # Imported here rather than at module scope for the same reason
+  # RemoteEvalService is (see this module's docstring): keeping the import off
+  # the module path means `pytest-adk eval --help` still works in an
+  # environment where the dependency is somehow missing. pytest-adk depends on
+  # tabulate directly (see pyproject.toml) rather than relying on google-adk's
+  # `eval` extra, so under a normal install this is always available.
+  from tabulate import tabulate
+
+  results_with_invocation = (
+      _AdkAgentEvaluator._get_eval_metric_results_with_invocation(
+          eval_case_results
+      )
+  )
+  for metric_name, metric_result in non_passing.items():
+    per_invocation = results_with_invocation.get(metric_name)
+    if not per_invocation:
+      # Defensive: the metric produced an overall verdict but no
+      # per-invocation results, leaving nothing to tabulate. Note a metric
+      # evaluator that *raised* is not this case -- google-adk still records a
+      # placeholder row per invocation (with no score) alongside the
+      # NOT_EVALUATED verdict, and that breakdown is worth showing. The
+      # one-line result has already reported the metric either way.
+      continue
+    status_label = _colorize(
+        metric_result.eval_status.name, _ANSI_RED, stream=sys.stderr
+    )
+    print(
+        f'Detail for [{eval_id}] {metric_name}:'
+        f' score={metric_result.score} threshold={metric_result.threshold}'
+        f' status={status_label}',
+        file=sys.stderr,
+    )
+    rows: list[dict[str, object]] = []
+    for result in per_invocation:
+      # expected_invocation is optional (a conversation_scenario-driven eval
+      # case has no golden turns), so fall back to the actual invocation for
+      # the prompt and leave the expected columns empty, as ADK does.
+      expected = result.expected_invocation
+      rows.append({
+          'eval_status': result.eval_metric_result.eval_status.name,
+          'score': result.eval_metric_result.score,
+          'threshold': metric_result.threshold,
+          'prompt': _AdkAgentEvaluator._convert_content_to_text(
+              expected.user_content
+              if expected
+              else result.actual_invocation.user_content
+          ),
+          'expected_response': _AdkAgentEvaluator._convert_content_to_text(
+              expected.final_response if expected else None
+          ),
+          'actual_response': _AdkAgentEvaluator._convert_content_to_text(
+              result.actual_invocation.final_response
+          ),
+          'expected_tool_calls': (
+              _AdkAgentEvaluator._convert_tool_calls_to_text(
+                  expected.intermediate_data if expected else None
+              )
+          ),
+          'actual_tool_calls': _AdkAgentEvaluator._convert_tool_calls_to_text(
+              result.actual_invocation.intermediate_data
+          ),
+      })
+    print(
+        tabulate(rows, headers='keys', tablefmt='grid', maxcolwidths=25),
+        file=sys.stderr,
+    )
 
 
 if __name__ == '__main__':
