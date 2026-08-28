@@ -69,6 +69,11 @@ A successful run includes output similar to:
 Eval results saved under: home_automation_agent/.adk/eval_history
 ```
 
+`--print-detailed-results` is what makes those passing lines appear (without
+it, only metrics that did not pass are reported). On a *failing* run the same
+flag additionally prints a per-invocation breakdown table on stderr, showing
+the prompt next to the expected and actual response and tool calls.
+
 Exact formatting may vary by google-adk version. The command exits with
 
 * `0` when all metrics pass

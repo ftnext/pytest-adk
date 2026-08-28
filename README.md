@@ -309,6 +309,24 @@ one app. See `pytest-adk eval --help` for the full flag list (`--user-id`,
 `--prompt-template-engine`, `--pythonpath`, `--keep-sessions`,
 `--print-detailed-results`).
 
+By default the command only reports metrics that did **not** pass, one line
+each, on stderr. `--print-detailed-results` adds two things: a one-line result
+for each *passing* metric (on stdout), and a per-invocation breakdown table for
+each metric that did not pass (on stderr), showing the prompt next to the
+expected and actual response and tool calls — which is what tells you *why* a
+metric failed. The table is printed once per eval case, so `--num-runs N`
+contributes N sets of rows to one table rather than repeating it.
+
+Mind the two streams when redirecting: passing results go to stdout while
+failures and their breakdown tables go to stderr, so `2>/dev/null` hides every
+failure and `>/dev/null` hides everything the flag adds to stdout.
+
+> **Note:** this is not the same setting as google-adk's own
+> `print_detailed_results`, which the `AgentEvaluator` pytest fixture takes
+> (see [Usage](#usage)). That one defaults to `True` and only prints the
+> failure tables; this flag defaults to off and also covers the passing
+> one-line results.
+
 `<prompt:...>` markers in the evalsets are rendered the same way as on the
 fixture path, but the engine is selected with `--prompt-template-engine`
 (`string`, the default, or `jinja`):

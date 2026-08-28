@@ -56,6 +56,12 @@ async def async_metric(
   return _scored(actual_invocations, 0.25)
 
 
+def raising_metric(
+    eval_metric, actual_invocations, expected_invocations, conversation_scenario
+):
+  raise RuntimeError('this metric always blows up')
+
+
 not_a_function = 'a module attribute that cannot be called'
 '''
 

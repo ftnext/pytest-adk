@@ -680,6 +680,239 @@ def test_passing_metric_status_is_colorized_green_when_stdout_is_a_tty(
   assert f'{cli_module._ANSI_GREEN}PASSED{cli_module._ANSI_RESET}' in out
 
 
+# ---------------------------------------------------------------------------
+# --print-detailed-results: per-invocation breakdown of non-passing metrics
+# ---------------------------------------------------------------------------
+
+
+def test_adk_helpers_the_invocation_breakdown_reuses_still_exist() -> None:
+  """Guard test (ROADMAP task 0-2 pattern) for google-adk internals.
+
+  ``_print_detailed_metric_results`` (src/pytest_adk/cli.py) builds its table
+  out of three ``AgentEvaluator`` private helpers rather than reimplementing
+  them. They are private, so a google-adk upgrade can rename or drop them; if
+  that happens this fails with a pointer to the code to revisit, instead of an
+  AttributeError surfacing only when someone runs a failing eval with
+  ``--print-detailed-results``.
+  """
+  missing = [
+      name
+      for name in (
+          '_get_eval_metric_results_with_invocation',
+          '_convert_content_to_text',
+          '_convert_tool_calls_to_text',
+      )
+      if not callable(getattr(cli_module._AdkAgentEvaluator, name, None))
+  ]
+
+  assert not missing, (
+      f'google-adk AgentEvaluator no longer provides: {missing}.'
+      ' pytest_adk.cli._print_detailed_metric_results() reuses these to build'
+      " the --print-detailed-results breakdown table, so a google-adk upgrade"
+      ' has broken it and cli.py must be revisited.'
+  )
+
+
+def _run_eval(
+    evalset_path: Path,
+    results_dir: Path,
+    server: FakeApiServer,
+    *extra_args: str,
+) -> int:
+  """Runs the eval subcommand against ``server`` with the standard arguments."""
+  return main(
+      [
+          'eval',
+          _AGENT_URL,
+          str(evalset_path),
+          '--app-name',
+          _APP_NAME,
+          '--user-id',
+          'cli_user',
+          '--results-dir',
+          str(results_dir),
+          *extra_args,
+      ],
+      transport=_transport_for(server),
+  )
+
+
+def test_detailed_results_print_the_failing_invocation_breakdown(
+    tmp_path, capsys
+) -> None:
+  """The flag's reason for existing: show *why* a metric failed, not just that."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+
+  exit_code = _run_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 1
+  err = capsys.readouterr().err
+  assert 'Detail for [weather_case] response_match_score:' in err
+  # The table's columns, and the actual-vs-expected pair that explains the
+  # failure -- the whole point of the breakdown.
+  assert 'expected_response' in err
+  assert 'actual_response' in err
+  assert 'It is sunny in Tokyo.' in err
+  assert "I'm not sure, ask someone" in err
+
+
+def test_failing_invocation_breakdown_is_absent_without_the_flag(
+    tmp_path, capsys
+) -> None:
+  """Regression guard: the breakdown is opt-in, the one-line failure is not."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+
+  exit_code = _run_eval(evalset_path, tmp_path / 'results', server)
+
+  assert exit_code == 1
+  captured = capsys.readouterr()
+  # The one-line failure is always reported...
+  assert 'response_match_score: score=0.0' in captured.err
+  # ...but nothing from the breakdown table, on either stream.
+  for stream in (captured.out, captured.err):
+    assert 'Detail for' not in stream
+    assert 'actual_response' not in stream
+
+
+def test_failing_invocation_breakdown_goes_to_stderr_not_stdout(
+    tmp_path, capsys
+) -> None:
+  """A failing run's diagnostics stay on one stream, next to the failures."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+
+  exit_code = _run_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 1
+  captured = capsys.readouterr()
+  assert 'Detail for [weather_case] response_match_score:' in captured.err
+  assert 'Detail for' not in captured.out
+  # stdout still carries the passing one-line results the flag also enables,
+  # so this is a split of streams rather than stdout simply being empty.
+  assert 'tool_trajectory_avg_score: score=1.0' in captured.out
+
+
+def test_passing_metrics_get_no_invocation_breakdown(tmp_path, capsys) -> None:
+  """A passing metric has nothing to diagnose, so it gets no table."""
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+
+  exit_code = _run_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 0
+  captured = capsys.readouterr()
+  # The passing one-line results are still printed, per the flag's other half.
+  assert 'response_match_score: score=1.0' in captured.out
+  for stream in (captured.out, captured.err):
+    assert 'Detail for' not in stream
+    assert 'actual_response' not in stream
+
+
+def test_invocation_breakdown_is_printed_once_per_eval_case(
+    tmp_path, capsys
+) -> None:
+  """--num-runs N repeats the one-line results, but not the table.
+
+  Every run's invocations belong in one table for the eval case, matching how
+  google-adk's own AgentEvaluator groups them; emitting N copies of the same
+  table would just bury the failure.
+  """
+  evalset_path = _write_evalset(tmp_path)
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _non_matching_script()
+
+  exit_code = _run_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--num-runs',
+      '2',
+      '--print-detailed-results',
+  )
+
+  assert exit_code == 1
+  err = capsys.readouterr().err
+  assert err.count('Detail for [weather_case] response_match_score:') == 1
+  # The one-line failure, by contrast, is still reported per run. Matched at
+  # the start of a line so the 'Detail for [weather_case] ...' summary, which
+  # repeats the same score and threshold, is not counted as a third one.
+  one_line_results = [
+      line
+      for line in err.splitlines()
+      if line.startswith('[weather_case] response_match_score: score=0.0')
+  ]
+  assert len(one_line_results) == 2
+  # Both runs' invocations are rows of that single table.
+  assert err.count("I'm not sure, ask someone") == 2
+
+
+def test_not_evaluated_metric_gets_a_breakdown_too(
+    tmp_path, capsys, write_metric_module
+) -> None:
+  """A metric evaluator that raises is NOT_EVALUATED, and still gets a table.
+
+  google-adk swallows the exception, records a NOT_EVALUATED verdict, and
+  still appends a placeholder row per invocation (with no score). Those rows
+  carry the prompt and the agent's actual response, which is exactly what you
+  need to reproduce the crash, so they are worth tabulating.
+  """
+  metric_dir = tmp_path / 'lib'
+  module_name = write_metric_module(metric_dir)
+  evalset_path = _write_evalset(
+      tmp_path / 'evals',
+      _custom_metric_config_json(f'{module_name}.raising_metric'),
+  )
+  server = FakeApiServer()
+  server.scripts['cli_user'] = _matching_script()
+
+  exit_code = _run_eval(
+      evalset_path,
+      tmp_path / 'results',
+      server,
+      '--num-runs',
+      '1',
+      '--pythonpath',
+      str(metric_dir),
+      '--print-detailed-results',
+  )
+
+  # google-adk skips NOT_EVALUATED metrics when deriving an eval case's final
+  # status (LocalEvalService._generate_final_eval_status), so a metric that
+  # blew up does not by itself fail the run -- the other metric passed. This
+  # asserts google-adk's behavior rather than pytest-adk's: the point here is
+  # that the breakdown is printed even on an exit-0 run.
+  assert exit_code == 0
+  captured = capsys.readouterr()
+  assert 'quality: score=None threshold=0.5 status=NOT_EVALUATED' in captured.err
+  assert 'Detail for [weather_case] quality:' in captured.err
+  assert 'NOT_EVALUATED' in captured.err
+  # The placeholder row still carries what the agent actually did.
+  assert 'It is sunny in Tokyo.' in captured.err
+  # The built-in metric alongside it passed and is reported on stdout.
+  assert 'tool_trajectory_avg_score: score=1.0' in captured.out
+
+
 def test_failing_metric_status_is_colorized_red_when_stderr_is_a_tty(
     tmp_path, monkeypatch
 ) -> None:
